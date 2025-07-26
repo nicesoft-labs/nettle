@@ -157,8 +157,9 @@ nettle_SOURCES = aes-decrypt-internal.c aes-decrypt.c aes-decrypt-table.c \
 		 serpent-meta.c \
 		 streebog.c streebog-meta.c \
                 twofish.c twofish-meta.c \
-                kuznyechik.c kuznyechik-meta.c \
-                sm4.c sm4-meta.c \
+               magma.c magma-meta.c \
+               kuznyechik.c kuznyechik-meta.c \
+               sm4.c sm4-meta.c \
 		 umac-nh.c umac-nh-n.c umac-l2.c umac-l3.c \
 		 umac-poly64.c umac-poly128.c umac-set-key.c \
 		 umac32.c umac64.c umac96.c umac128.c \
@@ -243,7 +244,7 @@ HEADERS = aes.h arcfour.h arctwo.h asn1.h blowfish.h balloon.h \
 	  ocb.h pbkdf2.h \
 	  pgp.h pkcs1.h pss.h pss-mgf1.h realloc.h ripemd160.h rsa.h \
 	  salsa20.h sexp.h serpent.h \
-         sha.h sha1.h sha2.h sha3.h sm3.h sm4.h streebog.h kuznyechik.h twofish.h \
+         sha.h sha1.h sha2.h sha3.h sm3.h sm4.h streebog.h kuznyechik.h magma.h twofish.h \
 	  umac.h yarrow.h xts.h poly1305.h nist-keywrap.h
 
 INSTALL_HEADERS = $(HEADERS) version.h @IF_MINI_GMP@ mini-gmp.h

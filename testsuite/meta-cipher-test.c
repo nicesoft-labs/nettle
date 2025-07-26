@@ -21,6 +21,7 @@ const char* ciphers[] = {
   "twofish192",
   "twofish256",
   "kuznyechik",
+  "magma",
   "sm4"
 };
 
