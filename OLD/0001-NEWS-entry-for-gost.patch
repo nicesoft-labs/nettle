@@ -1,0 +1,29 @@
+From 83b7c95b68d60b79b63e3a840c7a6b6aaa17097a Mon Sep 17 00:00:00 2001
+From: Nikos Mavrogiannopoulos <nmav@gnutls.org>
+Date: Sun, 11 Nov 2012 14:46:09 +0100
+Subject: [PATCH] NEWS entry for gost.
+
+---
+ NEWS | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/NEWS b/NEWS
+index dcb827b9..35439e20 100644
+--- a/NEWS
++++ b/NEWS
+@@ -5,6 +5,12 @@ NEWS for the 2.6 release
+ 	* Support for PKCS #5 PBKDF2.  Contributed by Simon Josefsson.
+           Specification in RFC 2898 and test vectors in RFC 6070.
+ 
++	* Support for GOST R 34.11-94 hash algorithm. Ported from librhash 
++	  by Nikos Mavrogiannopoulos. Written by Aleksey Kravchenko.
++	  More information in RFC4357. Test vectors taken from the GOST
++	  hash wikipedia page.
++          
++
+ NEWS for the 2.5 release
+ 
+ 	This release includes important portability fixes for Windows
+-- 
+2.49.0
+

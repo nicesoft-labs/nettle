@@ -1,0 +1,25 @@
+From e1f0897ccfe0c8ddc9ae1e4287c17820345882b4 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Niels=20M=C3=B6ller?= <nisse@lysator.liu.se>
+Date: Sun, 15 Sep 2019 10:28:58 +0200
+Subject: [PATCH] Add FIXME comment on struct gosthash94_ctx reorg.
+
+---
+ gosthash94.h | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/gosthash94.h b/gosthash94.h
+index dfa97f61..fb45c576 100644
+--- a/gosthash94.h
++++ b/gosthash94.h
+@@ -83,6 +83,8 @@ extern "C" {
+ #define GOSTHASH94CP_BLOCK_SIZE GOSTHASH94_BLOCK_SIZE
+ #define GOSTHASH94CP_DIGEST_SIZE GOSTHASH94_DIGEST_SIZE
+ 
++/* FIXME: Rearrange context struct to enable use of the MD_UPDATE
++   macro. Has to wait for an ABI update. */
+ struct gosthash94_ctx
+ {
+   uint32_t hash[8]; /* algorithm 256-bit state */
+-- 
+2.49.0
+

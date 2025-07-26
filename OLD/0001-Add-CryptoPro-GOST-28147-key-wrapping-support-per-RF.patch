@@ -1,0 +1,301 @@
+From 5d5673c8ec34ce2678c5778b90c203ed5b265494 Mon Sep 17 00:00:00 2001
+From: Dmitry Eremin-Solenikov <dbaryshkov@gmail.com>
+Date: Sun, 27 Nov 2016 12:56:24 +0300
+Subject: [PATCH] Add CryptoPro GOST 28147 key wrapping support per RFC4357
+
+Signed-off-by: Dmitry Eremin-Solenikov <dbaryshkov@gmail.com>
+---
+ Makefile.in                |   2 +-
+ gost-wrap.c                | 130 +++++++++++++++++++++++++++++++++++++
+ gost28147.h                |  25 +++++++
+ testsuite/gost28147-test.c |  76 ++++++++++++++++++++++
+ 4 files changed, 232 insertions(+), 1 deletion(-)
+ create mode 100644 gost-wrap.c
+
+diff --git a/Makefile.in b/Makefile.in
+index c6e40a74..4be3d0ce 100644
+--- a/Makefile.in
++++ b/Makefile.in
+@@ -103,7 +103,7 @@ nettle_SOURCES = aes-decrypt-internal.c aes-decrypt.c \
+ 		 gcm-camellia128.c gcm-camellia128-meta.c \
+ 		 gcm-camellia256.c gcm-camellia256-meta.c \
+ 		 cmac.c cmac64.c cmac-aes128.c cmac-aes256.c cmac-des3.c \
+-		 gost28147.c gost28147-meta.c \
++		 gost28147.c gost28147-meta.c gost-wrap.c \
+ 		 gosthash94.c gosthash94-meta.c \
+ 		 hmac.c hmac-gosthash94.c hmac-md5.c hmac-ripemd160.c \
+ 		 hmac-sha1.c hmac-sha224.c hmac-sha256.c hmac-sha384.c \
+diff --git a/gost-wrap.c b/gost-wrap.c
+new file mode 100644
+index 00000000..175757f2
+--- /dev/null
++++ b/gost-wrap.c
+@@ -0,0 +1,130 @@
++/* GOST 28147-89 (Magma) implementation
++ *
++ * Copyright: 2015, 2016 Dmitry Eremin-Solenikov <dbaryshkov@gmail.com>
++ * Copyright: 2009-2012 Aleksey Kravchenko <rhash.admin@gmail.com>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the
++ * "Software"), to deal in the Software without restriction, including
++ * without limitation the rights to use, copy, modify, merge, publish,
++ * distribute, sublicense, and/or sell copies of the Software, and to
++ * permit persons to whom the Software is furnished to do so, subject to
++ * the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included
++ * in all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
++ * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
++ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
++ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
++ * CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
++ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
++ * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
++ */
++
++#if HAVE_CONFIG_H
++#include "config.h"
++#endif
++
++#include <assert.h>
++#include <string.h>
++
++#include "macros.h"
++#include "gost28147.h"
++#include "cfb.h"
++
++void
++gost28147_kdf_cryptopro(const struct gost28147_param *param,
++		       const uint8_t *in,
++		       const uint8_t *ukm,
++		       uint8_t *out)
++{
++	struct gost28147_ctx ctx;
++	int i;
++
++	memcpy(out, in, GOST28147_KEY_SIZE);
++	for (i = 0; i < 8; i++) {
++		uint8_t mask;
++		uint8_t *p;
++		uint8_t iv[GOST28147_BLOCK_SIZE];
++		uint32_t block[2] = {0, 0};
++		uint32_t t;
++
++		for (p = out, mask = 1; mask; mask <<= 1) {
++			t = LE_READ_UINT32(p);
++			p += 4;
++			if (mask & ukm[i])
++				block[0] += t;
++			else
++				block[1] += t;
++		}
++
++		LE_WRITE_UINT32(iv + 0, block[0]);
++		LE_WRITE_UINT32(iv + 4, block[1]);
++
++		gost28147_set_key(&ctx, out);
++		gost28147_set_param(&ctx, param);
++		cfb_encrypt(&ctx,
++			    (nettle_cipher_func*)gost28147_encrypt_for_cfb,
++			    GOST28147_BLOCK_SIZE, iv,
++			    GOST28147_KEY_SIZE, out, out);
++	}
++}
++
++void
++gost28147_key_wrap_cryptopro(const struct gost28147_param *param,
++			     const uint8_t *kek,
++			     const uint8_t *ukm, size_t ukm_size,
++			     const uint8_t *cek,
++			     uint8_t *enc,
++			     uint8_t *imit)
++{
++	uint8_t kd[GOST28147_KEY_SIZE];
++	struct gost28147_ctx ctx;
++	struct gost28147_imit_ctx ictx;
++
++	assert(ukm_size >= GOST28147_IMIT_BLOCK_SIZE);
++
++	gost28147_kdf_cryptopro(param, kek, ukm, kd);
++	gost28147_set_key(&ctx, kd);
++	gost28147_set_param(&ctx, param);
++	gost28147_encrypt(&ctx, GOST28147_KEY_SIZE, enc, cek);
++
++	gost28147_imit_init(&ictx);
++	gost28147_imit_set_key(&ictx, GOST28147_KEY_SIZE, kd);
++	gost28147_imit_set_param(&ictx, param);
++	gost28147_imit_set_nonce(&ictx, ukm);
++	gost28147_imit_update(&ictx, GOST28147_KEY_SIZE, cek);
++	gost28147_imit_digest(&ictx, GOST28147_IMIT_DIGEST_SIZE, imit);
++}
++
++int
++gost28147_key_unwrap_cryptopro(const struct gost28147_param *param,
++			       const uint8_t *kek,
++			       const uint8_t *ukm, size_t ukm_size,
++			       const uint8_t *enc,
++			       const uint8_t *imit,
++			       uint8_t *cek)
++{
++	uint8_t kd[GOST28147_KEY_SIZE];
++	uint8_t mac[GOST28147_IMIT_DIGEST_SIZE];
++	struct gost28147_ctx ctx;
++	struct gost28147_imit_ctx ictx;
++
++	assert(ukm_size >= GOST28147_IMIT_BLOCK_SIZE);
++
++	gost28147_kdf_cryptopro(param, kek, ukm, kd);
++	gost28147_set_key(&ctx, kd);
++	gost28147_set_param(&ctx, param);
++	gost28147_decrypt(&ctx, GOST28147_KEY_SIZE, cek, enc);
++
++	gost28147_imit_init(&ictx);
++	gost28147_imit_set_key(&ictx, GOST28147_KEY_SIZE, kd);
++	gost28147_imit_set_param(&ictx, param);
++	gost28147_imit_set_nonce(&ictx, ukm);
++	gost28147_imit_update(&ictx, GOST28147_KEY_SIZE, cek);
++	gost28147_imit_digest(&ictx, GOST28147_IMIT_DIGEST_SIZE, mac);
++
++	return !memcmp(mac, imit, GOST28147_IMIT_DIGEST_SIZE);
++}
+diff --git a/gost28147.h b/gost28147.h
+index 6d380dff..52672c36 100644
+--- a/gost28147.h
++++ b/gost28147.h
+@@ -60,6 +60,10 @@ extern "C" {
+ #define gost28147_cnt_set_iv nettle_gost28147_cnt_set_iv
+ #define gost28147_cnt_crypt nettle_gost28147_cnt_crypt
+ 
++#define gost28147_kdf_cryptopro nettle_gost28147_kdf_cryptopro
++#define gost28147_key_wrap_cryptopro nettle_gost28147_key_wrap_cryptopro
++#define gost28147_key_unwrap_cryptopro nettle_gost28147_key_unwrap_cryptopro
++
+ #define gost28147_imit_init nettle_gost28147_imit_init
+ #define gost28147_imit_set_key nettle_gost28147_imit_set_key
+ #define gost28147_imit_set_nonce nettle_gost28147_imit_set_nonce
+@@ -134,6 +138,27 @@ gost28147_cnt_crypt(struct gost28147_cnt_ctx *ctx,
+ 		    size_t length, uint8_t *dst,
+ 		    const uint8_t *src);
+ 
++void
++gost28147_kdf_cryptopro(const struct gost28147_param *param,
++		       const uint8_t *in,
++		       const uint8_t *ukm,
++		       uint8_t *out);
++void
++gost28147_key_wrap_cryptopro(const struct gost28147_param *param,
++			     const uint8_t *kek,
++			     const uint8_t *ukm, size_t ukm_size,
++			     const uint8_t *cek,
++			     uint8_t *enc,
++			     uint8_t *imit);
++
++int
++gost28147_key_unwrap_cryptopro(const struct gost28147_param *param,
++			       const uint8_t *kek,
++			       const uint8_t *ukm, size_t ukm_size,
++			       const uint8_t *enc,
++			       const uint8_t *imit,
++			       uint8_t *cek);
++
+ #define GOST28147_IMIT_DIGEST_SIZE 4
+ #define GOST28147_IMIT_BLOCK_SIZE GOST28147_BLOCK_SIZE
+ #define GOST28147_IMIT_KEY_SIZE GOST28147_KEY_SIZE
+diff --git a/testsuite/gost28147-test.c b/testsuite/gost28147-test.c
+index 5682cf93..19610951 100644
+--- a/testsuite/gost28147-test.c
++++ b/testsuite/gost28147-test.c
+@@ -209,6 +209,76 @@ test_gost28147_imit(const struct gost28147_param *param,
+     }
+ }
+ 
++static void
++test_gost28147_wrap(const struct gost28147_param *param,
++		    const struct tstring *kek,
++		    const struct tstring *ukm,
++		    const struct tstring *cek,
++		    const struct tstring *enc,
++		    const struct tstring *imit)
++{
++  uint8_t data[GOST28147_KEY_SIZE], data_imit[GOST28147_IMIT_DIGEST_SIZE];
++  uint8_t data2[GOST28147_KEY_SIZE];
++  int ret;
++
++  gost28147_key_wrap_cryptopro(param, kek->data, ukm->data, ukm->length,
++			       cek->data, data, data_imit);
++
++  if (!MEMEQ(enc->length, data, enc->data))
++    {
++      fprintf(stderr, "Wrap failed:\nInput:");
++      tstring_print_hex(cek);
++      fprintf(stderr, "\nOutput: ");
++      print_hex(enc->length, data);
++      fprintf(stderr, "\nExpected:");
++      tstring_print_hex(enc);
++      fprintf(stderr, "\n");
++      FAIL();
++    }
++
++  if (!MEMEQ(imit->length, data_imit, imit->data))
++    {
++      fprintf(stderr, "Wrap failed:\nInput:");
++      tstring_print_hex(cek);
++      fprintf(stderr, "\nIMIT Output: ");
++      print_hex(imit->length, data_imit);
++      fprintf(stderr, "\nIMIT Expected:");
++      tstring_print_hex(imit);
++      fprintf(stderr, "\n");
++      FAIL();
++    }
++
++  ret = gost28147_key_unwrap_cryptopro(param, kek->data,
++				       ukm->data, ukm->length,
++				       data, data_imit, data2);
++  ASSERT(ret);
++  if (!MEMEQ(cek->length, data2, cek->data))
++    {
++      fprintf(stderr, "Unwrap failed:\nInput:");
++      tstring_print_hex(enc);
++      tstring_print_hex(imit);
++      fprintf(stderr, "\nOutput: ");
++      print_hex(cek->length, data2);
++      fprintf(stderr, "\nExpected:");
++      tstring_print_hex(cek);
++      fprintf(stderr, "\n");
++      FAIL();
++    }
++
++  data[0] ^= 1;
++  data_imit[0] ^= 1;
++
++  ret = gost28147_key_unwrap_cryptopro(param, kek->data,
++				       ukm->data, ukm->length,
++				       data, imit->data, data2);
++  ASSERT(!ret);
++
++  ret = gost28147_key_unwrap_cryptopro(param, kek->data,
++				       ukm->data, ukm->length,
++				       enc->data, data_imit, data2);
++  ASSERT(!ret);
++}
++
+ void test_main(void)
+ {
+   /* Examples from GOST R 34.11-94 standard */
+@@ -522,4 +592,10 @@ void test_main(void)
+       SHEX("b5a1f0e3 ce2f021d 67619434 5c41e36e"),
+       SHEX("03e56766"));
+ 
++  test_gost28147_wrap(&gost28147_param_TC26_Z,
++      SHEX("94DC0DCE F7BB36F7 5B94689E BB788B8B 8093DEA3 44062AC2 048194EC 078559B9"),
++      SHEX("BDE6576E 0E5CCD9E"),
++      SHEX("6BFF027B 125DC258 F07AD427 8093A408 B6F126E3 E949C585 3D6C0F5E 4072B6AA"),
++      SHEX("6ED1C0AE A3B0832B 2B75937F 5954E3C0 D307F660 7290976A F62791A8 6EB26A7B"),
++      SHEX("83D12F2C"));
+ }
+-- 
+2.49.0
+

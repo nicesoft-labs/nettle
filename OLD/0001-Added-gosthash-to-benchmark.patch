@@ -1,0 +1,46 @@
+From a53482764d911f47b9827b1d101cfeeb20065c4b Mon Sep 17 00:00:00 2001
+From: Nikos Mavrogiannopoulos <nmav@gnutls.org>
+Date: Sun, 11 Nov 2012 14:44:32 +0100
+Subject: [PATCH] Added gosthash to benchmark.
+
+---
+ ChangeLog                   | 1 +
+ examples/nettle-benchmark.c | 3 +--
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/ChangeLog b/ChangeLog
+index a39733dd..3844803b 100644
+--- a/ChangeLog
++++ b/ChangeLog
+@@ -3,6 +3,7 @@
+ 	From Nikos Mavrogiannopoulos:
+ 	* nettle.texinfo (Hash functions): Added documentation for
+ 	gosthash94.
++	* examples/nettle-benchmark.c (main): Benchmark gosthash94.
+ 
+ 2012-11-10  Niels Möller  <nisse@lysator.liu.se>
+ 
+diff --git a/examples/nettle-benchmark.c b/examples/nettle-benchmark.c
+index 7446fbce..bcdd3a49 100644
+--- a/examples/nettle-benchmark.c
++++ b/examples/nettle-benchmark.c
+@@ -605,7 +605,6 @@ bench_salsa20_core(void)
+ 
+   double count[5];
+   
+-  uint8_t *p;
+   unsigned i, j;
+ 
+   for (j = 0; j < 5; j++)
+@@ -651,7 +650,7 @@ main(int argc, char **argv)
+       &nettle_sha1, OPENSSL(&nettle_openssl_sha1)
+       &nettle_sha224, &nettle_sha256,
+       &nettle_sha384, &nettle_sha512,
+-      &nettle_ripemd160,
++      &nettle_ripemd160, &nettle_gosthash94,
+       NULL
+     };
+ 
+-- 
+2.49.0
+

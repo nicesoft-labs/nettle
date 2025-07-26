@@ -1,0 +1,1121 @@
+From 21b0cbbd442ab5861eeda4a0f413584936d62bd5 Mon Sep 17 00:00:00 2001
+From: Dmitry Eremin-Solenikov <dbaryshkov@gmail.com>
+Date: Thu, 13 Oct 2016 22:11:39 +0300
+Subject: [PATCH] Add GOST DSA according to GOST R 34.10-2012
+
+Signed-off-by: Dmitry Eremin-Solenikov <dbaryshkov@gmail.com>
+---
+ Makefile.in                     |   4 +-
+ ecc-gostdsa-sign.c              | 103 ++++++++++++++++++++++
+ ecc-gostdsa-verify.c            | 132 ++++++++++++++++++++++++++++
+ ecc-hash.c                      |  15 ++++
+ ecc-internal.h                  |   7 ++
+ gostdsa-sign.c                  |  76 ++++++++++++++++
+ gostdsa-verify.c                |  80 +++++++++++++++++
+ gostdsa.h                       | 102 ++++++++++++++++++++++
+ testsuite/.gitignore            |   3 +
+ testsuite/.test-rules.make      |   9 ++
+ testsuite/Makefile.in           |   4 +-
+ testsuite/gostdsa-keygen-test.c | 134 +++++++++++++++++++++++++++++
+ testsuite/gostdsa-sign-test.c   | 125 +++++++++++++++++++++++++++
+ testsuite/gostdsa-verify-test.c | 148 ++++++++++++++++++++++++++++++++
+ testsuite/testutils.h           |   1 +
+ 15 files changed, 941 insertions(+), 2 deletions(-)
+ create mode 100644 ecc-gostdsa-sign.c
+ create mode 100644 ecc-gostdsa-verify.c
+ create mode 100644 gostdsa-sign.c
+ create mode 100644 gostdsa-verify.c
+ create mode 100644 gostdsa.h
+ create mode 100644 testsuite/gostdsa-keygen-test.c
+ create mode 100644 testsuite/gostdsa-sign-test.c
+ create mode 100644 testsuite/gostdsa-verify-test.c
+
+diff --git a/Makefile.in b/Makefile.in
+index e004f4e2..34011705 100644
+--- a/Makefile.in
++++ b/Makefile.in
+@@ -189,6 +189,8 @@ hogweed_SOURCES = sexp.c sexp-format.c \
+ 		  ecc-point.c ecc-scalar.c ecc-point-mul.c ecc-point-mul-g.c \
+ 		  ecc-ecdsa-sign.c ecdsa-sign.c \
+ 		  ecc-ecdsa-verify.c ecdsa-verify.c ecdsa-keygen.c \
++		  ecc-gostdsa-sign.c gostdsa-sign.c \
++		  ecc-gostdsa-verify.c gostdsa-verify.c \
+ 		  curve25519-mul-g.c curve25519-mul.c curve25519-eh-to-x.c \
+ 		  eddsa-compress.c eddsa-decompress.c eddsa-expand.c \
+ 		  eddsa-hash.c eddsa-pubkey.c eddsa-sign.c eddsa-verify.c \
+@@ -202,7 +204,7 @@ HEADERS = aes.h arcfour.h arctwo.h asn1.h blowfish.h \
+ 	  cbc.h ccm.h cfb.h chacha.h chacha-poly1305.h ctr.h \
+ 	  curve25519.h des.h dsa.h dsa-compat.h eax.h \
+ 	  ecc-curve.h ecc.h ecdsa.h eddsa.h \
+-	  gcm.h gost28147.h gosthash94.h hmac.h \
++	  gcm.h gost28147.h gostdsa.h gosthash94.h hmac.h \
+ 	  knuth-lfib.h hkdf.h \
+ 	  macros.h \
+ 	  cmac.h siv-cmac.h \
+diff --git a/ecc-gostdsa-sign.c b/ecc-gostdsa-sign.c
+new file mode 100644
+index 00000000..0b8671d3
+--- /dev/null
++++ b/ecc-gostdsa-sign.c
+@@ -0,0 +1,103 @@
++/* ecc-gostdsa-sign.c
++
++   Copyright (C) 2015 Dmitry Eremin-Solenikov
++   Copyright (C) 2013, 2014 Niels Möller
++
++   This file is part of GNU Nettle.
++
++   GNU Nettle is free software: you can redistribute it and/or
++   modify it under the terms of either:
++
++     * the GNU Lesser General Public License as published by the Free
++       Software Foundation; either version 3 of the License, or (at your
++       option) any later version.
++
++   or
++
++     * the GNU General Public License as published by the Free
++       Software Foundation; either version 2 of the License, or (at your
++       option) any later version.
++
++   or both in parallel, as here.
++
++   GNU Nettle is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   General Public License for more details.
++
++   You should have received copies of the GNU General Public License and
++   the GNU Lesser General Public License along with this program.  If
++   not, see http://www.gnu.org/licenses/.
++*/
++
++/* Development of Nettle's ECC support was funded by the .SE Internet Fund. */
++
++#if HAVE_CONFIG_H
++# include "config.h"
++#endif
++
++#include <assert.h>
++#include <stdlib.h>
++
++#include "gostdsa.h"
++#include "ecc-internal.h"
++
++/* Low-level GOST DSA signing */
++
++mp_size_t
++ecc_gostdsa_sign_itch (const struct ecc_curve *ecc)
++{
++  /* Needs 3*ecc->p.size + scratch for ecc->mul_g. Currently same for
++     ecc_mul_g and ecc_mul_g_eh. */
++  return ECC_GOSTDSA_SIGN_ITCH (ecc->p.size);
++}
++
++/* NOTE: Caller should check if r or s is zero. */
++void
++ecc_gostdsa_sign (const struct ecc_curve *ecc,
++		const mp_limb_t *zp,
++		const mp_limb_t *kp,
++		size_t length, const uint8_t *digest,
++		mp_limb_t *rp, mp_limb_t *sp,
++		mp_limb_t *scratch)
++{
++#define P	    scratch
++#define hp	    (scratch + 4*ecc->p.size)
++#define tp	    (scratch + 2*ecc->p.size)
++#define t2p	    scratch
++  /* Procedure, according to GOST 34.10. q denotes the group
++     order.
++
++     1. k <-- uniformly random, 0 < k < q
++
++     2. C <-- (c_x, c_y) = k g
++
++     3. r <-- c_x mod q
++
++     4. s <-- (r*z + k*h) mod q.
++  */
++
++  ecc->mul_g (ecc, P, kp, P + 3*ecc->p.size);
++  /* x coordinate only, modulo q */
++  ecc->h_to_a (ecc, 2, rp, P, P + 3*ecc->p.size);
++
++  /* Process hash digest */
++  gost_hash (&ecc->q, hp, length, digest);
++  if (mpn_zero_p (hp, ecc->p.size))
++    mpn_add_1 (hp, hp, ecc->p.size, 1);
++
++  ecc_modq_mul (ecc, tp, rp, zp);
++  ecc_modq_mul (ecc, t2p, kp, hp);
++  ecc_modq_add (ecc, sp, tp, t2p);
++
++  /* Also reduce mod ecc->q. It should already be < 2*ecc->q,
++   * so one subtraction should suffice. */
++
++  *scratch = mpn_sub_n (tp, sp, ecc->q.m, ecc->p.size);
++  cnd_copy (*scratch == 0, sp, tp, ecc->p.size);
++
++#undef P
++#undef hp
++#undef tp
++#undef t2p
++}
+diff --git a/ecc-gostdsa-verify.c b/ecc-gostdsa-verify.c
+new file mode 100644
+index 00000000..44f87b89
+--- /dev/null
++++ b/ecc-gostdsa-verify.c
+@@ -0,0 +1,132 @@
++/* ecc-gostdsa-verify.c
++
++   Copyright (C) 2015 Dmitry Eremin-Solenikov
++   Copyright (C) 2013, 2014 Niels Möller
++
++   This file is part of GNU Nettle.
++
++   GNU Nettle is free software: you can redistribute it and/or
++   modify it under the terms of either:
++
++     * the GNU Lesser General Public License as published by the Free
++       Software Foundation; either version 3 of the License, or (at your
++       option) any later version.
++
++   or
++
++     * the GNU General Public License as published by the Free
++       Software Foundation; either version 2 of the License, or (at your
++       option) any later version.
++
++   or both in parallel, as here.
++
++   GNU Nettle is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   General Public License for more details.
++
++   You should have received copies of the GNU General Public License and
++   the GNU Lesser General Public License along with this program.  If
++   not, see http://www.gnu.org/licenses/.
++*/
++
++/* Development of Nettle's ECC support was funded by the .SE Internet Fund. */
++
++#if HAVE_CONFIG_H
++# include "config.h"
++#endif
++
++#include <assert.h>
++#include <stdlib.h>
++
++#include "gostdsa.h"
++#include "ecc-internal.h"
++
++/* Low-level GOST DSA verify */
++
++static int
++ecdsa_in_range (const struct ecc_curve *ecc, const mp_limb_t *xp)
++{
++  return !mpn_zero_p (xp, ecc->p.size)
++    && mpn_cmp (xp, ecc->q.m, ecc->p.size) < 0;
++}
++
++mp_size_t
++ecc_gostdsa_verify_itch (const struct ecc_curve *ecc)
++{
++  /* Largest storage need is for the ecc->mul call. */
++  return 5*ecc->p.size + ecc->mul_itch;
++}
++
++/* FIXME: Use faster primitives, not requiring side-channel silence. */
++int
++ecc_gostdsa_verify (const struct ecc_curve *ecc,
++		  const mp_limb_t *pp, /* Public key */
++		  size_t length, const uint8_t *digest,
++		  const mp_limb_t *rp, const mp_limb_t *sp,
++		  mp_limb_t *scratch)
++{
++  /* Procedure, according to GOST R 34.10. q denotes the group
++     order.
++
++     1. Check 0 < r, s < q.
++
++     2. v <-- h^{-1}  (mod q)
++
++     3. z1  <-- s * v (mod q)
++
++     4. z2  <-- -r * v (mod q)
++
++     5. R = u1 G + u2 Y
++
++     6. Signature is valid if R_x = r (mod q).
++  */
++
++#define hp (scratch)
++#define vp (scratch + ecc->p.size)
++#define z1 (scratch + 3*ecc->p.size)
++#define z2 (scratch + 4*ecc->p.size)
++
++#define P1 (scratch + 4*ecc->p.size)
++#define P2 (scratch)
++
++
++  if (! (ecdsa_in_range (ecc, rp)
++	 && ecdsa_in_range (ecc, sp)))
++    return 0;
++
++  gost_hash (&ecc->q, hp, length, digest);
++
++  if (mpn_zero_p (hp, ecc->p.size))
++    mpn_add_1 (hp, hp, ecc->p.size, 1);
++
++  /* Compute v */
++  ecc->q.invert (&ecc->q, vp, hp, vp + 2*ecc->p.size);
++
++  /* z1 = s / h, P1 = z1 * G */
++  ecc_modq_mul (ecc, z1, sp, vp);
++
++  /* z2 = - r / h, P2 = z2 * Y */
++  ecc_modq_mul (ecc, z2, rp, vp);
++  mpn_sub_n (z2, ecc->q.m, z2, ecc->p.size);
++
++   /* Total storage: 5*ecc->p.size + ecc->mul_itch */
++  ecc->mul (ecc, P2, z2, pp, z2 + ecc->p.size);
++
++  /* Total storage: 7*ecc->p.size + ecc->mul_g_itch (ecc->p.size) */
++  ecc->mul_g (ecc, P1, z1, P1 + 3*ecc->p.size);
++
++  /* Total storage: 6*ecc->p.size + ecc->add_hhh_itch */
++  ecc->add_hhh (ecc, P1, P1, P2, P1 + 3*ecc->p.size);
++
++  /* x coordinate only, modulo q */
++  ecc->h_to_a (ecc, 2, P2, P1, P1 + 3*ecc->p.size);
++
++  return (mpn_cmp (rp, P2, ecc->p.size) == 0);
++#undef P2
++#undef P1
++#undef z2
++#undef z1
++#undef hp
++#undef vp
++}
+diff --git a/ecc-hash.c b/ecc-hash.c
+index 4e830a51..add8dd7b 100644
+--- a/ecc-hash.c
++++ b/ecc-hash.c
+@@ -62,3 +62,18 @@ ecc_hash (const struct ecc_modulo *m,
+     /* We got a few extra bits, at the low end. Discard them. */
+     mpn_rshift (hp, hp, m->size + 1, 8*length - m->bit_size);
+ }
++
++void
++gost_hash (const struct ecc_modulo *m,
++	   mp_limb_t *hp,
++	   size_t length, const uint8_t *digest)
++{
++  if (length > ((size_t) m->bit_size + 7) / 8)
++    length = (m->bit_size + 7) / 8;
++
++  mpn_set_base256_le (hp, m->size + 1, digest, length);
++
++  if (8 * length > m->bit_size)
++    /* We got a few extra bits, at the low end. Discard them. */
++    mpn_rshift (hp, hp, m->size + 1, 8*length - m->bit_size);
++}
+diff --git a/ecc-internal.h b/ecc-internal.h
+index c6d00ac4..c9beec92 100644
+--- a/ecc-internal.h
++++ b/ecc-internal.h
+@@ -53,6 +53,7 @@
+ #define ecc_mod _nettle_ecc_mod
+ #define ecc_mod_inv _nettle_ecc_mod_inv
+ #define ecc_hash _nettle_ecc_hash
++#define gost_hash _nettle_gost_hash
+ #define ecc_a_to_j _nettle_ecc_a_to_j
+ #define ecc_j_to_a _nettle_ecc_j_to_a
+ #define ecc_eh_to_a _nettle_ecc_eh_to_a
+@@ -280,6 +281,11 @@ ecc_hash (const struct ecc_modulo *m,
+ 	  mp_limb_t *hp,
+ 	  size_t length, const uint8_t *digest);
+ 
++void
++gost_hash (const struct ecc_modulo *m,
++	  mp_limb_t *hp,
++	  size_t length, const uint8_t *digest);
++
+ /* Converts a point P in affine coordinates into a point R in jacobian
+    coordinates. */
+ void
+@@ -420,6 +426,7 @@ curve25519_eh_to_x (mp_limb_t *xp, const mp_limb_t *p,
+   (((3 << ECC_MUL_A_EH_WBITS) + 10) * (size))
+ #endif
+ #define ECC_ECDSA_SIGN_ITCH(size) (12*(size))
++#define ECC_GOSTDSA_SIGN_ITCH(size) (12*(size))
+ #define ECC_MOD_RANDOM_ITCH(size) (size)
+ #define ECC_HASH_ITCH(size) (1+(size))
+ 
+diff --git a/gostdsa-sign.c b/gostdsa-sign.c
+new file mode 100644
+index 00000000..598654ac
+--- /dev/null
++++ b/gostdsa-sign.c
+@@ -0,0 +1,76 @@
++/* gostdsa-sign.c
++
++   Copyright (C) 2015 Dmitry Eremin-Solenikov
++   Copyright (C) 2013 Niels Möller
++
++   This file is part of GNU Nettle.
++
++   GNU Nettle is free software: you can redistribute it and/or
++   modify it under the terms of either:
++
++     * the GNU Lesser General Public License as published by the Free
++       Software Foundation; either version 3 of the License, or (at your
++       option) any later version.
++
++   or
++
++     * the GNU General Public License as published by the Free
++       Software Foundation; either version 2 of the License, or (at your
++       option) any later version.
++
++   or both in parallel, as here.
++
++   GNU Nettle is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   General Public License for more details.
++
++   You should have received copies of the GNU General Public License and
++   the GNU Lesser General Public License along with this program.  If
++   not, see http://www.gnu.org/licenses/.
++*/
++
++/* Development of Nettle's ECC support was funded by the .SE Internet Fund. */
++
++#if HAVE_CONFIG_H
++# include "config.h"
++#endif
++
++#include <assert.h>
++#include <stdlib.h>
++
++#include "gostdsa.h"
++#include "ecc-internal.h"
++#include "nettle-internal.h"
++
++void
++gostdsa_sign (const struct ecc_scalar *key,
++	    void *random_ctx, nettle_random_func *random,
++	    size_t digest_length,
++	    const uint8_t *digest,
++	    struct dsa_signature *signature)
++{
++  /* At most 936 bytes. */
++  TMP_DECL(k, mp_limb_t, ECC_MAX_SIZE + ECC_GOSTDSA_SIGN_ITCH (ECC_MAX_SIZE));
++  mp_limb_t size = key->ecc->p.size;
++  mp_limb_t *rp = mpz_limbs_write (signature->r, size);
++  mp_limb_t *sp = mpz_limbs_write (signature->s, size);
++
++  TMP_ALLOC (k, size + ECC_GOSTDSA_SIGN_ITCH (size));
++
++  /* Timing reveals the number of rounds through this loop, but the
++     timing is still independent of the secret k finally used. */
++  do
++    {
++      do
++        {
++          ecc_mod_random (&key->ecc->q, k, random_ctx, random, k + size);
++	}
++      while (mpn_zero_p(k, size));
++      ecc_gostdsa_sign (key->ecc, key->p, k, digest_length, digest,
++		   rp, sp, k + size);
++      mpz_limbs_finish (signature->r, size);
++      mpz_limbs_finish (signature->s, size);
++    }
++  while (mpz_sgn (signature->r) == 0 || mpz_sgn (signature->s) == 0);
++}
+diff --git a/gostdsa-verify.c b/gostdsa-verify.c
+new file mode 100644
+index 00000000..cdf87d6b
+--- /dev/null
++++ b/gostdsa-verify.c
+@@ -0,0 +1,80 @@
++/* gostdsa-verify.c
++
++   Copyright (C) 2015 Dmitry Eremin-Solenikov
++   Copyright (C) 2013 Niels Möller
++
++   This file is part of GNU Nettle.
++
++   GNU Nettle is free software: you can redistribute it and/or
++   modify it under the terms of either:
++
++     * the GNU Lesser General Public License as published by the Free
++       Software Foundation; either version 3 of the License, or (at your
++       option) any later version.
++
++   or
++
++     * the GNU General Public License as published by the Free
++       Software Foundation; either version 2 of the License, or (at your
++       option) any later version.
++
++   or both in parallel, as here.
++
++   GNU Nettle is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   General Public License for more details.
++
++   You should have received copies of the GNU General Public License and
++   the GNU Lesser General Public License along with this program.  If
++   not, see http://www.gnu.org/licenses/.
++*/
++
++/* Development of Nettle's ECC support was funded by the .SE Internet Fund. */
++
++#if HAVE_CONFIG_H
++# include "config.h"
++#endif
++
++#include <assert.h>
++#include <stdlib.h>
++
++#include "gostdsa.h"
++
++#include "gmp-glue.h"
++
++int
++gostdsa_verify (const struct ecc_point *pub,
++	      size_t length, const uint8_t *digest,
++	      const struct dsa_signature *signature)
++{
++  mp_limb_t size = ecc_size (pub->ecc);
++  mp_size_t itch = 2*size + ecc_gostdsa_verify_itch (pub->ecc);
++  /* For ECC_MUL_A_WBITS == 0, at most 1512 bytes. With
++     ECC_MUL_A_WBITS == 4, currently needs 67 * ecc->size, at most
++     4824 bytes. Don't use stack allocation for this. */
++  mp_limb_t *scratch;
++  int res;
++
++#define rp scratch
++#define sp (scratch + size)
++#define scratch_out (scratch + 2*size)
++
++  if (mpz_sgn (signature->r) <= 0 || mpz_size (signature->r) > size
++      || mpz_sgn (signature->s) <= 0 || mpz_size (signature->s) > size)
++    return 0;
++
++  scratch = gmp_alloc_limbs (itch);
++
++  mpz_limbs_copy (rp, signature->r, size);
++  mpz_limbs_copy (sp, signature->s, size);
++
++  res = ecc_gostdsa_verify (pub->ecc, pub->p, length, digest, rp, sp, scratch_out);
++
++  gmp_free_limbs (scratch, itch);
++
++  return res;
++#undef rp
++#undef sp
++#undef scratch_out
++}
+diff --git a/gostdsa.h b/gostdsa.h
+new file mode 100644
+index 00000000..b3453343
+--- /dev/null
++++ b/gostdsa.h
+@@ -0,0 +1,102 @@
++/* gostdsa.h
++
++   Copyright (C) 2015 Dmity Eremin-Solenikov
++   Copyright (C) 2013 Niels Möller
++
++   This file is part of GNU Nettle.
++
++   GNU Nettle is free software: you can redistribute it and/or
++   modify it under the terms of either:
++
++     * the GNU Lesser General Public License as published by the Free
++       Software Foundation; either version 3 of the License, or (at your
++       option) any later version.
++
++   or
++
++     * the GNU General Public License as published by the Free
++       Software Foundation; either version 2 of the License, or (at your
++       option) any later version.
++
++   or both in parallel, as here.
++
++   GNU Nettle is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   General Public License for more details.
++
++   You should have received copies of the GNU General Public License and
++   the GNU Lesser General Public License along with this program.  If
++   not, see http://www.gnu.org/licenses/.
++*/
++
++/* Development of Nettle's ECC support was funded by the .SE Internet Fund. */
++
++#ifndef NETTLE_GOSTDSA_H_INCLUDED
++#define NETTLE_GOSTDSA_H_INCLUDED
++
++#include "ecc.h"
++#include "dsa.h"
++#include "ecdsa.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* Name mangling */
++#define gostdsa_sign nettle_gostdsa_sign
++#define gostdsa_verify nettle_gostdsa_verify
++#define ecc_gostdsa_sign nettle_ecc_gostdsa_sign
++#define ecc_gostdsa_sign_itch nettle_ecc_gostdsa_sign_itch
++#define ecc_gostdsa_verify nettle_ecc_gostdsa_verify
++#define ecc_gostdsa_verify_itch nettle_ecc_gostdsa_verify_itch
++
++/* Just use ECDSA function for key generation */
++#define gostdsa_generate_keypair ecdsa_generate_keypair
++
++/* High level GOST DSA functions.
++ *
++ * A public key is represented as a struct ecc_point, and a private
++ * key as a struct ecc_scalar. FIXME: Introduce some aliases? */
++void
++gostdsa_sign (const struct ecc_scalar *key,
++	      void *random_ctx, nettle_random_func *random,
++	      size_t digest_length,
++	      const uint8_t *digest,
++	      struct dsa_signature *signature);
++
++int
++gostdsa_verify (const struct ecc_point *pub,
++	        size_t length, const uint8_t *digest,
++	        const struct dsa_signature *signature);
++
++/* Low-level GOSTDSA functions. */
++mp_size_t
++ecc_gostdsa_sign_itch (const struct ecc_curve *ecc);
++
++void
++ecc_gostdsa_sign (const struct ecc_curve *ecc,
++		const mp_limb_t *zp,
++		/* Random nonce, must be invertible mod ecc group
++		   order. */
++		const mp_limb_t *kp,
++		size_t length, const uint8_t *digest,
++		mp_limb_t *rp, mp_limb_t *sp,
++		mp_limb_t *scratch);
++
++mp_size_t
++ecc_gostdsa_verify_itch (const struct ecc_curve *ecc);
++
++int
++ecc_gostdsa_verify (const struct ecc_curve *ecc,
++		  const mp_limb_t *pp, /* Public key */
++		  size_t length, const uint8_t *digest,
++		  const mp_limb_t *rp, const mp_limb_t *sp,
++		  mp_limb_t *scratch);
++
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* NETTLE_GOSTDSA_H_INCLUDED */
+diff --git a/testsuite/.gitignore b/testsuite/.gitignore
+index 11d786ba..caf4e165 100644
+--- a/testsuite/.gitignore
++++ b/testsuite/.gitignore
+@@ -43,6 +43,9 @@
+ /eddsa-verify-test
+ /gcm-test
+ /gost28147-test
++/gostdsa-keygen-test
++/gostdsa-sign-test
++/gostdsa-verify-test
+ /gosthash94-test
+ /hkdf-test
+ /hmac-test
+diff --git a/testsuite/.test-rules.make b/testsuite/.test-rules.make
+index 9e52db05..f819b4ba 100644
+--- a/testsuite/.test-rules.make
++++ b/testsuite/.test-rules.make
+@@ -286,6 +286,15 @@ eddsa-verify-test$(EXEEXT): eddsa-verify-test.$(OBJEXT)
+ ed25519-test$(EXEEXT): ed25519-test.$(OBJEXT)
+ 	$(LINK) ed25519-test.$(OBJEXT) $(TEST_OBJS) -o ed25519-test$(EXEEXT)
+ 
++gostdsa-sign-test$(EXEEXT): gostdsa-sign-test.$(OBJEXT)
++	$(LINK) gostdsa-sign-test.$(OBJEXT) $(TEST_OBJS) -o gostdsa-sign-test$(EXEEXT)
++
++gostdsa-verify-test$(EXEEXT): gostdsa-verify-test.$(OBJEXT)
++	$(LINK) gostdsa-verify-test.$(OBJEXT) $(TEST_OBJS) -o gostdsa-verify-test$(EXEEXT)
++
++gostdsa-keygen-test$(EXEEXT): gostdsa-keygen-test.$(OBJEXT)
++	$(LINK) gostdsa-keygen-test.$(OBJEXT) $(TEST_OBJS) -o gostdsa-keygen-test$(EXEEXT)
++
+ sha1-huge-test$(EXEEXT): sha1-huge-test.$(OBJEXT)
+ 	$(LINK) sha1-huge-test.$(OBJEXT) $(TEST_OBJS) -o sha1-huge-test$(EXEEXT)
+ 
+diff --git a/testsuite/Makefile.in b/testsuite/Makefile.in
+index 892ec1f3..3011e295 100644
+--- a/testsuite/Makefile.in
++++ b/testsuite/Makefile.in
+@@ -54,7 +54,9 @@ TS_HOGWEED_SOURCES = sexp-test.c sexp-format-test.c \
+ 		     ecdsa-sign-test.c ecdsa-verify-test.c \
+ 		     ecdsa-keygen-test.c ecdh-test.c \
+ 		     eddsa-compress-test.c eddsa-sign-test.c \
+-		     eddsa-verify-test.c ed25519-test.c
++		     eddsa-verify-test.c ed25519-test.c \
++		     gostdsa-sign-test.c gostdsa-verify-test.c \
++		     gostdsa-keygen-test.c
+ 
+ TS_SOURCES = $(TS_NETTLE_SOURCES) $(TS_HOGWEED_SOURCES)
+ CXX_SOURCES = cxx-test.cxx
+diff --git a/testsuite/gostdsa-keygen-test.c b/testsuite/gostdsa-keygen-test.c
+new file mode 100644
+index 00000000..ab932ed5
+--- /dev/null
++++ b/testsuite/gostdsa-keygen-test.c
+@@ -0,0 +1,134 @@
++#include "testutils.h"
++#include "knuth-lfib.h"
++
++/* Check if y^2 = x^3 - 3x + b */
++static int
++ecc_valid_p (struct ecc_point *pub)
++{
++  mpz_t t, x, y;
++  mpz_t lhs, rhs;
++  int res;
++  mp_size_t size;
++
++  size = pub->ecc->p.size;
++
++  /* First check range */
++  if (mpn_cmp (pub->p, pub->ecc->p.m, size) >= 0
++      || mpn_cmp (pub->p + size, pub->ecc->p.m, size) >= 0)
++    return 0;
++
++  mpz_init (lhs);
++  mpz_init (rhs);
++
++  mpz_roinit_n (x, pub->p, size);
++  mpz_roinit_n (y, pub->p + size, size);
++
++  mpz_mul (lhs, y, y);
++  
++  if (pub->ecc->p.bit_size == 255)
++    {
++      /* Check that
++	 121666 (1 + x^2 - y^2) = 121665 x^2 y^2 */
++      mpz_t x2;
++      mpz_init (x2);
++      mpz_mul (x2, x, x); /* x^2 */
++      mpz_mul (rhs, x2, lhs); /* x^2 y^2 */
++      mpz_sub (lhs, x2, lhs); /* x^2 - y^2 */
++      mpz_add_ui (lhs, lhs, 1); /* 1 + x^2 - y^2 */
++      mpz_mul_ui (lhs, lhs, 121666);
++      mpz_mul_ui (rhs, rhs, 121665);
++
++      mpz_clear (x2);
++    }
++  else
++    {
++      /* Check y^2 = x^3 - 3 x + b */
++      mpz_mul (rhs, x, x);
++      mpz_sub_ui (rhs, rhs, 3);
++      mpz_mul (rhs, rhs, x);
++      mpz_add (rhs, rhs, mpz_roinit_n (t, pub->ecc->b, size));
++    }
++  res = mpz_congruent_p (lhs, rhs, mpz_roinit_n (t, pub->ecc->p.m, size));
++  
++  mpz_clear (lhs);
++  mpz_clear (rhs);
++
++  return res;
++}
++
++void
++test_main (void)
++{
++  unsigned i;
++  struct knuth_lfib_ctx rctx;
++  struct dsa_signature signature;
++
++  struct tstring *digest;
++
++  knuth_lfib_init (&rctx, 4711);
++  dsa_signature_init (&signature);
++
++  digest = SHEX (/* sha256("abc") */
++		 "BA7816BF 8F01CFEA 414140DE 5DAE2223"
++		 "B00361A3 96177A9C B410FF61 F20015AD");
++
++  for (i = 0; ecc_curves[i]; i++)
++    {
++      const struct ecc_curve *ecc = ecc_curves[i];
++      struct ecc_point pub;
++      struct ecc_scalar key;
++
++      if (verbose)
++	fprintf (stderr, "Curve %d\n", ecc->p.bit_size);
++
++      ecc_point_init (&pub, ecc);
++      ecc_scalar_init (&key, ecc);
++
++      ecdsa_generate_keypair (&pub, &key,
++			      &rctx,
++			      (nettle_random_func *) knuth_lfib_random);
++
++      if (verbose)
++	{
++	  fprintf (stderr, "Public key:\nx = ");
++	  write_mpn (stderr, 16, pub.p, ecc->p.size);
++	  fprintf (stderr, "\ny = ");
++	  write_mpn (stderr, 16, pub.p + ecc->p.size, ecc->p.size);
++	  fprintf (stderr, "\nPrivate key: ");
++	  write_mpn (stderr, 16, key.p, ecc->p.size);
++	  fprintf (stderr, "\n");
++	}
++      if (!ecc_valid_p (&pub))
++	die ("gostdsa_generate_keypair produced an invalid point.\n");
++
++      gostdsa_sign (&key,
++		   &rctx, (nettle_random_func *) knuth_lfib_random,
++		   digest->length, digest->data,
++		   &signature);
++
++      if (!gostdsa_verify (&pub, digest->length, digest->data,
++			   &signature))
++	die ("gostdsa_verify failed.\n");
++
++      digest->data[3] ^= 17;
++      if (gostdsa_verify (&pub, digest->length, digest->data,
++			  &signature))
++	die ("gostdsa_verify  returned success with invalid digest.\n");
++      digest->data[3] ^= 17;
++
++      mpz_combit (signature.r, 117);
++      if (gostdsa_verify (&pub, digest->length, digest->data,
++			  &signature))
++	die ("gostdsa_verify  returned success with invalid signature.r.\n");
++
++      mpz_combit (signature.r, 117);
++      mpz_combit (signature.s, 93);
++      if (gostdsa_verify (&pub, digest->length, digest->data,
++			  &signature))
++	die ("gostdsa_verify  returned success with invalid signature.s.\n");
++
++      ecc_point_clear (&pub);
++      ecc_scalar_clear (&key);
++    }
++  dsa_signature_clear (&signature);
++}
+diff --git a/testsuite/gostdsa-sign-test.c b/testsuite/gostdsa-sign-test.c
+new file mode 100644
+index 00000000..ea2cff1c
+--- /dev/null
++++ b/testsuite/gostdsa-sign-test.c
+@@ -0,0 +1,125 @@
++#include "testutils.h"
++
++static void
++test_gostdsa (const struct ecc_curve *ecc,
++	    /* Private key */
++	    const char *sz,
++	    /* Random nonce */
++	    const char *sk,
++	    /* Hash */
++	    const struct tstring *h,
++	    /* Expected signature */
++	    const char *r, const char *s)
++{
++  struct dsa_signature ref;
++  mpz_t z;
++  mpz_t k;
++  mp_limb_t *rp = xalloc_limbs (ecc->p.size);
++  mp_limb_t *sp = xalloc_limbs (ecc->p.size);
++  mp_limb_t *scratch = xalloc_limbs (ecc_gostdsa_sign_itch (ecc));
++
++  dsa_signature_init (&ref);
++
++  mpz_init_set_str (z, sz, 16);
++  mpz_init_set_str (k, sk, 16);
++
++  ecc_gostdsa_sign (ecc, mpz_limbs_read_n (z, ecc->p.size),
++		  mpz_limbs_read_n (k, ecc->p.size),
++		  h->length, h->data, rp, sp, scratch);
++
++  mpz_set_str (ref.r, r, 16);
++  mpz_set_str (ref.s, s, 16);
++
++  if (mpz_limbs_cmp (ref.r, rp, ecc->p.size) != 0
++      || mpz_limbs_cmp (ref.s, sp, ecc->p.size) != 0)
++    {
++      fprintf (stderr, "_gostdsa_sign failed, bit_size = %u\n", ecc->p.bit_size);
++      fprintf (stderr, "r     = ");
++      write_mpn (stderr, 16, rp, ecc->p.size);
++      fprintf (stderr, "\ns     = ");
++      write_mpn (stderr, 16, sp, ecc->p.size);
++      fprintf (stderr, "\nref.r = ");
++      mpz_out_str (stderr, 16, ref.r);
++      fprintf (stderr, "\nref.s = ");
++      mpz_out_str (stderr, 16, ref.s);
++      fprintf (stderr, "\n");
++      abort();
++    }
++
++  free (rp);
++  free (sp);
++  free (scratch);
++
++  dsa_signature_clear (&ref);
++  mpz_clear (k);
++  mpz_clear (z);
++}
++
++void
++test_main (void)
++{
++  test_gostdsa (nettle_get_gost_256cpa(),
++	      "BFCF1D623E5CDD3032A7C6EABB4A923C46E43D640FFEAAF2C3ED39A8FA399924", /* z */
++
++	      "5782C53F110C596F9155D35EBD25A06A89C50391850A8FEFE33B0E270318857C", /* k */
++
++	      SHEX("1C067E20EA6CB183F22EFB0F3C6FD2A4E6A02821CB7A1B17FACD5E1F7AA76F70"), /* h */
++
++	      "E9323A5E88DD87FB7C724383BFFE7CECD4B9FFA2AC33BEEF73A5A1F743404F6B", /* r */
++
++	      "5E5B9B805B01147A8492C4A162643AC615DC777B9174108F3DC276A41F987AF3"); /* s */
++
++  test_gostdsa (nettle_get_gost_256cpb(),
++	      "3FCF1D623E5CDD3032A7C6EABB4A923C46E43D640FFEAAF2C3ED39A8FA399924", /* z */
++
++	      "5782C53F110C596F9155D35EBD25A06A89C50391850A8FEFE33B0E270318857C", /* k */
++
++	      SHEX("1C067E20EA6CB183F22EFB0F3C6FD2A4E6A02821CB7A1B17FACD5E1F7AA76F70"), /* h */
++
++	      "4E8F9973B31A134CE0942421573B0529B07EC96B835A07856C16CE8070C62547", /* r */
++
++	      "10CE0EFA72741D5EB24837563AAB9369781D6F487ACF88BBEE3E49EC239F6A90"); /* s */
++
++  test_gostdsa (nettle_get_gost_256cpc(),
++	      "3FCF1D623E5CDD3032A7C6EABB4A923C46E43D640FFEAAF2C3ED39A8FA399924", /* z */
++
++	      "5782C53F110C596F9155D35EBD25A06A89C50391850A8FEFE33B0E270318857C", /* k */
++
++	      SHEX("1C067E20EA6CB183F22EFB0F3C6FD2A4E6A02821CB7A1B17FACD5E1F7AA76F70"), /* h */
++
++	      "7A03B527F916AF43DB655362A54AA9EBAF1A02B5776B5EBD8F00484EE8FD4AC6", /* r */
++
++	      "7D21C2C0D9AD2D03B5D0EF47AE85AB8861067C1FF5394A755BD4A30B5591F8C4"); /* s */
++
++  test_gostdsa (nettle_get_gost_512a(),
++	      "3FC01CDCD4EC5F972EB482774C41E66DB7F380528DFE9E67992BA05AEE462435"
++	      "757530E641077CE587B976C8EEB48C48FD33FD175F0C7DE6A44E014E6BCB074B", /* z */
++
++	      "72ABB44536656BF1618CE10BF7EADD40582304A51EE4E2A25A0A32CB0E773ABB"
++	      "23B7D8FDD8FA5EEE91B4AE452F2272C86E1E2221215D405F51B5D5015616E1F6", /* k */
++
++	      SHEX("EDC257BED45FDDE4F1457B7F5B19017A8F204184366689D938532CDBAA5CB29A"
++		   "1D369DA57F8B983BE272219BD2C9A4FC57ECF7A77F34EE2E8AA553976A4766C0"), /* h */
++
++	      "891AA75C2A6F3B4DE27E3903F61CBB0F3F85A4E3C62F39A6E4E84A7477679C6E"
++	      "45008DC2774CA2FF64C12C0606FF918CAE3A50115440E9BF2971B627A882A1E8", /* r */
++
++	      "31065479996DDBDEE180AFE22CA3CDC44B45CE4C6C83909D1D3B702922A32441"
++	      "A9E11DCFBEA3D847C06B1A8A38EB1671D6C82FA21B79C99BE2EA809B10DAA5DF"); /* s */
++
++  test_gostdsa (nettle_get_gost_512b(),
++	      "3FC01CDCD4EC5F972EB482774C41E66DB7F380528DFE9E67992BA05AEE462435"
++	      "757530E641077CE587B976C8EEB48C48FD33FD175F0C7DE6A44E014E6BCB074B", /* z */
++
++	      "72ABB44536656BF1618CE10BF7EADD40582304A51EE4E2A25A0A32CB0E773ABB"
++	      "23B7D8FDD8FA5EEE91B4AE452F2272C86E1E2221215D405F51B5D5015616E1F6", /* k */
++
++	      SHEX("EDC257BED45FDDE4F1457B7F5B19017A8F204184366689D938532CDBAA5CB29A"
++		   "1D369DA57F8B983BE272219BD2C9A4FC57ECF7A77F34EE2E8AA553976A4766C0"), /* h */
++
++	      "5DBF2F4C2D6A7705880FB1458CC58335065BEA5621FC9FBC176C4ACA5BC1E672"
++	      "25459A8EA3779434590DC872704029365A83A53B5EB3C06936B5D287E0A983E7", /* r */
++
++	      "4E6D2EE8A693D35F31F2551D43B4F6BC6F9EE7B9D27323873386C7DE5F91C39E"
++	      "D3AAE39B7D07FA92B3C742E9E1B16E11D9F7308E485B715987668346AEF1723D"); /* s */
++}
+diff --git a/testsuite/gostdsa-verify-test.c b/testsuite/gostdsa-verify-test.c
+new file mode 100644
+index 00000000..f9723b7b
+--- /dev/null
++++ b/testsuite/gostdsa-verify-test.c
+@@ -0,0 +1,148 @@
++#include "testutils.h"
++
++static void
++test_gostdsa (const struct ecc_curve *ecc,
++	    /* Public key */
++	    const char *xs, const char *ys,
++	    /* Hash */
++	    struct tstring *h,
++	    /* Valid signature */
++	    const char *r, const char *s)
++{
++  struct ecc_point pub;
++  struct dsa_signature signature;
++  mpz_t x, y;
++
++  ecc_point_init (&pub, ecc);
++  dsa_signature_init (&signature);
++
++  mpz_init_set_str (x, xs, 16);
++  mpz_init_set_str (y, ys, 16);
++
++  if (!ecc_point_set (&pub, x, y))
++    die ("ecc_point_set failed.\n");
++
++  mpz_set_str (signature.r, r, 16);
++  mpz_set_str (signature.s, s, 16);
++
++  if (!gostdsa_verify (&pub, h->length, h->data, &signature))
++    {
++      fprintf (stderr, "gostdsa_verify failed with valid signature.\n");
++    fail:
++      fprintf (stderr, "bit_size = %u\nx = ", ecc->p.bit_size);
++      mpz_out_str (stderr, 16, x);
++      fprintf (stderr, "\ny = ");
++      mpz_out_str (stderr, 16, y);
++      fprintf (stderr, "\ndigest ");
++      print_hex (h->length, h->data);
++      fprintf (stderr, "r = ");
++      mpz_out_str (stderr, 16, signature.r);
++      fprintf (stderr, "\ns = ");
++      mpz_out_str (stderr, 16, signature.s);
++      fprintf (stderr, "\n");
++      abort();
++    }
++
++  mpz_combit (signature.r, ecc->p.bit_size / 3);
++  if (gostdsa_verify (&pub, h->length, h->data, &signature))
++    {
++      fprintf (stderr, "gostdsa_verify unexpectedly succeeded with invalid signature.\n");
++      goto fail;
++    }
++  mpz_combit (signature.r, ecc->p.bit_size / 3);
++
++  mpz_combit (signature.s, 4*ecc->p.bit_size / 5);
++  if (gostdsa_verify (&pub, h->length, h->data, &signature))
++    {
++      fprintf (stderr, "gostdsa_verify unexpectedly succeeded with invalid signature.\n");
++      goto fail;
++    }
++  mpz_combit (signature.s, 4*ecc->p.bit_size / 5);
++
++  h->data[2*h->length / 3] ^= 0x40;
++  if (gostdsa_verify (&pub, h->length, h->data, &signature))
++    {
++      fprintf (stderr, "gostdsa_verify unexpectedly succeeded with invalid signature.\n");
++      goto fail;
++    }
++  h->data[2*h->length / 3] ^= 0x40;
++  if (!gostdsa_verify (&pub, h->length, h->data, &signature))
++    {
++      fprintf (stderr, "gostdsa_verify failed, internal testsuite error.\n");
++      goto fail;
++    }
++
++  ecc_point_clear (&pub);
++  dsa_signature_clear (&signature);
++  mpz_clear (x);
++  mpz_clear (y);
++}
++
++void
++test_main (void)
++{
++  test_gostdsa (nettle_get_gost_256cpa(),
++	      "971566CEDA436EE7678F7E07E84EBB7217406C0B4747AA8FD2AB1453C3D0DFBA", /* x */
++
++	      "AD58736965949F8E59830F8DE20FC6C0D177F6AB599874F1E2E24FF71F9CE643", /* y */
++
++	      SHEX("1C067E20EA6CB183F22EFB0F3C6FD2A4E6A02821CB7A1B17FACD5E1F7AA76F70"), /* h */
++
++	      "E9323A5E88DD87FB7C724383BFFE7CECD4B9FFA2AC33BEEF73A5A1F743404F6B", /* r */
++
++	      "5E5B9B805B01147A8492C4A162643AC615DC777B9174108F3DC276A41F987AF3"); /* s */
++
++  test_gostdsa (nettle_get_gost_256cpb(),
++	      "347E354F60B8DA8DE659B432600418C7D0E70F01622477579FAB36A066B9B8FD", /* x */
++
++	      "1DD2E31CF7840A5109DFAB561E15D42BC3CE2E64995FB70F3B86679655A1BAA1", /* y */
++
++	      SHEX("1C067E20EA6CB183F22EFB0F3C6FD2A4E6A02821CB7A1B17FACD5E1F7AA76F70"), /* h */
++
++	      "4E8F9973B31A134CE0942421573B0529B07EC96B835A07856C16CE8070C62547", /* r */
++
++	      "10CE0EFA72741D5EB24837563AAB9369781D6F487ACF88BBEE3E49EC239F6A90"); /* s */
++
++  test_gostdsa (nettle_get_gost_256cpc(),
++	      "1F737CC71E43E3FB35B886383714CA5E1226ECDF21F6063E6EA2E40DD04C44EC", /* x */
++
++	      "7DD94CE1044CCEAD21E4E985E281034058A5B11F37B5F96F31DDCF7D513D164E", /* y */
++
++	      SHEX("1C067E20EA6CB183F22EFB0F3C6FD2A4E6A02821CB7A1B17FACD5E1F7AA76F70"), /* h */
++
++	      "7A03B527F916AF43DB655362A54AA9EBAF1A02B5776B5EBD8F00484EE8FD4AC6", /* r */
++
++	      "7D21C2C0D9AD2D03B5D0EF47AE85AB8861067C1FF5394A755BD4A30B5591F8C4"); /* s */
++
++  test_gostdsa (nettle_get_gost_512a(),
++	      "03A36340A95BB5F93D131961B5B1C1B3213DF7FF3B5A30376407E2A65C441BC6"
++	      "D1B34662317083243F007B15A8512B526606D3B172B606DCE86DBD6F82DA3D40", /* x */
++
++	      "DEAD76318012FED79507809C89CC44848743640EAC9A3C847DA9082E050760A1"
++	      "0679F4B707ABC1872640AD20D7441F66C7A8B3BFF1B8E11B4A076F0A86749F73", /* y */
++
++	      SHEX("EDC257BED45FDDE4F1457B7F5B19017A8F204184366689D938532CDBAA5CB29A"
++		   "1D369DA57F8B983BE272219BD2C9A4FC57ECF7A77F34EE2E8AA553976A4766C0"), /* h */
++
++	      "891AA75C2A6F3B4DE27E3903F61CBB0F3F85A4E3C62F39A6E4E84A7477679C6E"
++	      "45008DC2774CA2FF64C12C0606FF918CAE3A50115440E9BF2971B627A882A1E8", /* r */
++
++	      "31065479996DDBDEE180AFE22CA3CDC44B45CE4C6C83909D1D3B702922A32441"
++	      "A9E11DCFBEA3D847C06B1A8A38EB1671D6C82FA21B79C99BE2EA809B10DAA5DF"); /* s */
++
++  test_gostdsa (nettle_get_gost_512b(),
++	      "07134627CE7FC6770953ABA4714B38AF8DE764B8870A502C2F4CC2D05541459A"
++	      "18DA3B9D4EBC09BC06CB2EA1856A03747561CF04C34382111539230A550F1913", /* x */
++
++	      "7E08A434CB2FA300F8974E3FF69A4BCDF36B6308E1D7A56144693A35E11CBD14"
++	      "D502916E680E35FE1E6ABBA85BD4DAE7065308B16B1CCABFE3D91CE0655B0FFD", /* y */
++
++	      SHEX("EDC257BED45FDDE4F1457B7F5B19017A8F204184366689D938532CDBAA5CB29A"
++		   "1D369DA57F8B983BE272219BD2C9A4FC57ECF7A77F34EE2E8AA553976A4766C0"), /* h */
++
++	      "5DBF2F4C2D6A7705880FB1458CC58335065BEA5621FC9FBC176C4ACA5BC1E672"
++	      "25459A8EA3779434590DC872704029365A83A53B5EB3C06936B5D287E0A983E7", /* r */
++
++	      "4E6D2EE8A693D35F31F2551D43B4F6BC6F9EE7B9D27323873386C7DE5F91C39E"
++	      "D3AAE39B7D07FA92B3C742E9E1B16E11D9F7308E485B715987668346AEF1723D"); /* s */
++}
+diff --git a/testsuite/testutils.h b/testsuite/testutils.h
+index 9133700c..8cdcdfac 100644
+--- a/testsuite/testutils.h
++++ b/testsuite/testutils.h
+@@ -22,6 +22,7 @@
+ # include "ecc.h"
+ # include "ecc-internal.h"
+ # include "ecdsa.h"
++# include "gostdsa.h"
+ # include "gmp-glue.h"
+ # if NETTLE_USE_MINI_GMP
+ #  include "knuth-lfib.h"
+-- 
+2.49.0
+

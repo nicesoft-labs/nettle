@@ -1,0 +1,278 @@
+From 7d67a6e6bc84b59d3b613a6310e1d7b4d3de237f Mon Sep 17 00:00:00 2001
+From: Dmitry Eremin-Solenikov <dbaryshkov@gmail.com>
+Date: Wed, 16 Nov 2016 09:25:59 +0300
+Subject: [PATCH] Implement GOST VKO key derivation algorithm
+
+Signed-off-by: Dmitry Eremin-Solenikov <dbaryshkov@gmail.com>
+---
+ Makefile.in                  |  2 +-
+ gostdsa-vko.c                | 77 ++++++++++++++++++++++++++++++
+ gostdsa.h                    |  7 +++
+ testsuite/.gitignore         |  1 +
+ testsuite/.test-rules.make   |  3 ++
+ testsuite/Makefile.in        |  2 +-
+ testsuite/gostdsa-vko-test.c | 91 ++++++++++++++++++++++++++++++++++++
+ 7 files changed, 181 insertions(+), 2 deletions(-)
+ create mode 100644 gostdsa-vko.c
+ create mode 100644 testsuite/gostdsa-vko-test.c
+
+diff --git a/Makefile.in b/Makefile.in
+index 34011705..294dde1c 100644
+--- a/Makefile.in
++++ b/Makefile.in
+@@ -190,7 +190,7 @@ hogweed_SOURCES = sexp.c sexp-format.c \
+ 		  ecc-ecdsa-sign.c ecdsa-sign.c \
+ 		  ecc-ecdsa-verify.c ecdsa-verify.c ecdsa-keygen.c \
+ 		  ecc-gostdsa-sign.c gostdsa-sign.c \
+-		  ecc-gostdsa-verify.c gostdsa-verify.c \
++		  ecc-gostdsa-verify.c gostdsa-verify.c gostdsa-vko.c \
+ 		  curve25519-mul-g.c curve25519-mul.c curve25519-eh-to-x.c \
+ 		  eddsa-compress.c eddsa-decompress.c eddsa-expand.c \
+ 		  eddsa-hash.c eddsa-pubkey.c eddsa-sign.c eddsa-verify.c \
+diff --git a/gostdsa-vko.c b/gostdsa-vko.c
+new file mode 100644
+index 00000000..f12cf7bf
+--- /dev/null
++++ b/gostdsa-vko.c
+@@ -0,0 +1,77 @@
++/* gostdsa-vko.c
++
++   Copyright (C) 2016 Dmitry Eremin-Solenikov
++
++   This file is part of GNU Nettle.
++
++   GNU Nettle is free software: you can redistribute it and/or
++   modify it under the terms of either:
++
++     * the GNU Lesser General Public License as published by the Free
++       Software Foundation; either version 3 of the License, or (at your
++       option) any later version.
++
++   or
++
++     * the GNU General Public License as published by the Free
++       Software Foundation; either version 2 of the License, or (at your
++       option) any later version.
++
++   or both in parallel, as here.
++
++   GNU Nettle is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   General Public License for more details.
++
++   You should have received copies of the GNU General Public License and
++   the GNU Lesser General Public License along with this program.  If
++   not, see http://www.gnu.org/licenses/.
++*/
++
++#if HAVE_CONFIG_H
++# include "config.h"
++#endif
++
++#include <assert.h>
++#include <stdlib.h>
++
++#include "ecc-internal.h"
++#include "gostdsa.h"
++
++int
++gostdsa_vko(const struct ecc_scalar *key,
++	    const struct ecc_point *pub,
++	    size_t ukm_length, const uint8_t *ukm,
++	    size_t out_length, uint8_t *out)
++{
++  const struct ecc_curve *ecc = key->ecc;
++  unsigned bsize = (ecc_bit_size(ecc) + 7) / 8;
++  mp_size_t size = ecc->p.size;
++  mp_size_t itch = 4*size + ecc->mul_itch;
++  mp_limb_t *scratch;
++
++  if (itch < 5*size + ecc->h_to_a_itch)
++      itch = 5*size + ecc->h_to_a_itch;
++
++  if (pub->ecc != ecc)
++      return 0;
++
++  if (out_length < 2 * bsize) {
++      return 0;
++  }
++
++  scratch = gmp_alloc_limbs (itch);
++
++  mpn_set_base256_le (scratch, size, ukm, ukm_length);
++  if (mpn_zero_p (scratch, size))
++    mpn_add_1 (scratch, scratch, size, 1);
++  ecc_modq_mul (ecc, scratch + 3*size, key->p, scratch);
++  ecc->mul (ecc, scratch, scratch + 3*size, pub->p, scratch + 4*size);
++  ecc->h_to_a (ecc, 0, scratch + 3*size, scratch, scratch + 5*size);
++  mpn_get_base256_le (out, bsize, scratch + 3*size, size);
++  mpn_get_base256_le (out+bsize, bsize, scratch + 4*size, size);
++  gmp_free_limbs (scratch, itch);
++
++  return 2 * bsize;
++}
+diff --git a/gostdsa.h b/gostdsa.h
+index b3453343..71a05263 100644
+--- a/gostdsa.h
++++ b/gostdsa.h
+@@ -46,6 +46,7 @@ extern "C" {
+ /* Name mangling */
+ #define gostdsa_sign nettle_gostdsa_sign
+ #define gostdsa_verify nettle_gostdsa_verify
++#define gostdsa_vko nettle_gostdsa_vko
+ #define ecc_gostdsa_sign nettle_ecc_gostdsa_sign
+ #define ecc_gostdsa_sign_itch nettle_ecc_gostdsa_sign_itch
+ #define ecc_gostdsa_verify nettle_ecc_gostdsa_verify
+@@ -70,6 +71,12 @@ gostdsa_verify (const struct ecc_point *pub,
+ 	        size_t length, const uint8_t *digest,
+ 	        const struct dsa_signature *signature);
+ 
++int
++gostdsa_vko(const struct ecc_scalar *key,
++	    const struct ecc_point *pub,
++	    size_t ukm_length, const uint8_t *ukm,
++	    size_t out_length, uint8_t *out);
++
+ /* Low-level GOSTDSA functions. */
+ mp_size_t
+ ecc_gostdsa_sign_itch (const struct ecc_curve *ecc);
+diff --git a/testsuite/.gitignore b/testsuite/.gitignore
+index caf4e165..802d82bd 100644
+--- a/testsuite/.gitignore
++++ b/testsuite/.gitignore
+@@ -46,6 +46,7 @@
+ /gostdsa-keygen-test
+ /gostdsa-sign-test
+ /gostdsa-verify-test
++/gostdsa-vko-test
+ /gosthash94-test
+ /hkdf-test
+ /hmac-test
+diff --git a/testsuite/.test-rules.make b/testsuite/.test-rules.make
+index f819b4ba..899cab3a 100644
+--- a/testsuite/.test-rules.make
++++ b/testsuite/.test-rules.make
+@@ -295,6 +295,9 @@ gostdsa-verify-test$(EXEEXT): gostdsa-verify-test.$(OBJEXT)
+ gostdsa-keygen-test$(EXEEXT): gostdsa-keygen-test.$(OBJEXT)
+ 	$(LINK) gostdsa-keygen-test.$(OBJEXT) $(TEST_OBJS) -o gostdsa-keygen-test$(EXEEXT)
+ 
++gostdsa-vko-test$(EXEEXT): gostdsa-vko-test.$(OBJEXT)
++	$(LINK) gostdsa-vko-test.$(OBJEXT) $(TEST_OBJS) -o gostdsa-vko-test$(EXEEXT)
++
+ sha1-huge-test$(EXEEXT): sha1-huge-test.$(OBJEXT)
+ 	$(LINK) sha1-huge-test.$(OBJEXT) $(TEST_OBJS) -o sha1-huge-test$(EXEEXT)
+ 
+diff --git a/testsuite/Makefile.in b/testsuite/Makefile.in
+index 3011e295..1c407bd1 100644
+--- a/testsuite/Makefile.in
++++ b/testsuite/Makefile.in
+@@ -56,7 +56,7 @@ TS_HOGWEED_SOURCES = sexp-test.c sexp-format-test.c \
+ 		     eddsa-compress-test.c eddsa-sign-test.c \
+ 		     eddsa-verify-test.c ed25519-test.c \
+ 		     gostdsa-sign-test.c gostdsa-verify-test.c \
+-		     gostdsa-keygen-test.c
++		     gostdsa-keygen-test.c gostdsa-vko-test.c
+ 
+ TS_SOURCES = $(TS_NETTLE_SOURCES) $(TS_HOGWEED_SOURCES)
+ CXX_SOURCES = cxx-test.cxx
+diff --git a/testsuite/gostdsa-vko-test.c b/testsuite/gostdsa-vko-test.c
+new file mode 100644
+index 00000000..2defc62d
+--- /dev/null
++++ b/testsuite/gostdsa-vko-test.c
+@@ -0,0 +1,91 @@
++#include "testutils.h"
++#include "streebog.h"
++
++static void
++test_vko (const struct ecc_curve *ecc,
++	  const char *priv,
++	  const char *x,
++	  const char *y,
++	  const struct tstring *ukm,
++	  const struct nettle_hash *hash,
++	  void * hash_ctx,
++	  const struct tstring *res)
++{
++    struct ecc_scalar ecc_key;
++    struct ecc_point ecc_pub;
++    mpz_t temp1, temp2;
++    int ret;
++    uint8_t out[128];
++
++    ecc_point_init (&ecc_pub, ecc);
++    mpz_init_set_str (temp1, x, 16);
++    mpz_init_set_str (temp2, y, 16);
++    ASSERT (ecc_point_set (&ecc_pub, temp1, temp2) != 0);
++
++    ecc_scalar_init (&ecc_key, ecc);
++    mpz_set_str (temp1, priv, 16);
++    ASSERT (ecc_scalar_set (&ecc_key, temp1) != 0);
++
++    mpz_clear (temp1);
++    mpz_clear (temp2);
++
++    ret = gostdsa_vko (&ecc_key, &ecc_pub,
++		       ukm->length, ukm->data,
++		       sizeof(out), out);
++    ASSERT (ret != 0);
++
++    ecc_scalar_clear (&ecc_key);
++    ecc_point_clear (&ecc_pub);
++
++    hash->init (hash_ctx);
++    hash->update (hash_ctx, ret, out);
++    hash->digest (hash_ctx, hash->digest_size, out);
++
++    ASSERT (hash->digest_size == res->length);
++    ASSERT (MEMEQ (res->length, out, res->data));
++}
++
++void
++test_main (void)
++{
++    struct streebog256_ctx ctx_256;
++    struct streebog256_ctx ctx_512;
++
++    test_vko(nettle_get_gost_512a(),
++	     "67b63ca4ac8d2bb32618d89296c7476dbeb9f9048496f202b1902cf2ce41dbc2f847712d960483458d4b380867f426c7ca0ff5782702dbc44ee8fc72d9ec90c9",
++	     "51a6d54ee932d176e87591121cce5f395cb2f2f147114d95f463c8a7ed74a9fc5ecd2325a35fb6387831ea66bc3d2aa42ede35872cc75372073a71b983e12f19",
++	     "793bde5bf72840ad22b02a363ae4772d4a52fc08ba1a20f7458a222a13bf98b53be002d1973f1e398ce46c17da6d00d9b6d0076f8284dcc42e599b4c413b8804",
++	     SHEX("1d 80 60 3c 85 44 c7 27"),
++	     &nettle_streebog256,
++	     &ctx_256,
++	     SHEX("c9 a9 a7 73 20 e2 cc 55 9e d7 2d ce 6f 47 e2 19 2c ce a9 5f a6 48 67 05 82 c0 54 c0 ef 36 c2 21"));
++
++    test_vko(nettle_get_gost_512a(),
++	     "dbd09213a592da5bbfd8ed068cccccbbfbeda4feac96b9b4908591440b0714803b9eb763ef932266d4c0181a9b73eacf9013efc65ec07c888515f1b6f759c848",
++	     "a7c0adb12743c10c3c1beb97c8f631242f7937a1deb6bce5e664e49261baccd3f5dc56ec53b2abb90ca1eb703078ba546655a8b99f79188d2021ffaba4edb0aa",
++	     "5adb1c63a4e4465e0bbefd897fb9016475934cfa0f8c95f992ea402d47921f46382d00481b720314b19d8c878e75d81b9763358dd304b2ed3a364e07a3134691",
++	     SHEX("1d 80 60 3c 85 44 c7 27"),
++	     &nettle_streebog256,
++	     &ctx_256,
++	     SHEX("c9 a9 a7 73 20 e2 cc 55 9e d7 2d ce 6f 47 e2 19 2c ce a9 5f a6 48 67 05 82 c0 54 c0 ef 36 c2 21"));
++
++    test_vko(nettle_get_gost_512a(),
++	     "67b63ca4ac8d2bb32618d89296c7476dbeb9f9048496f202b1902cf2ce41dbc2f847712d960483458d4b380867f426c7ca0ff5782702dbc44ee8fc72d9ec90c9",
++	     "51a6d54ee932d176e87591121cce5f395cb2f2f147114d95f463c8a7ed74a9fc5ecd2325a35fb6387831ea66bc3d2aa42ede35872cc75372073a71b983e12f19",
++	     "793bde5bf72840ad22b02a363ae4772d4a52fc08ba1a20f7458a222a13bf98b53be002d1973f1e398ce46c17da6d00d9b6d0076f8284dcc42e599b4c413b8804",
++	     SHEX("1d 80 60 3c 85 44 c7 27"),
++	     &nettle_streebog512,
++	     &ctx_512,
++	     SHEX("79 f0 02 a9 69 40 ce 7b de 32 59 a5 2e 01 52 97 ad aa d8 45 97 a0 d2 05 b5 0e 3e 17 19 f9 7b fa"
++		  "7e e1 d2 66 1f a9 97 9a 5a a2 35 b5 58 a7 e6 d9 f8 8f 98 2d d6 3f c3 5a 8e c0 dd 5e 24 2d 3b df"));
++
++    test_vko(nettle_get_gost_512a(),
++	     "dbd09213a592da5bbfd8ed068cccccbbfbeda4feac96b9b4908591440b0714803b9eb763ef932266d4c0181a9b73eacf9013efc65ec07c888515f1b6f759c848",
++	     "a7c0adb12743c10c3c1beb97c8f631242f7937a1deb6bce5e664e49261baccd3f5dc56ec53b2abb90ca1eb703078ba546655a8b99f79188d2021ffaba4edb0aa",
++	     "5adb1c63a4e4465e0bbefd897fb9016475934cfa0f8c95f992ea402d47921f46382d00481b720314b19d8c878e75d81b9763358dd304b2ed3a364e07a3134691",
++	     SHEX("1d 80 60 3c 85 44 c7 27"),
++	     &nettle_streebog512,
++	     &ctx_512,
++	     SHEX("79 f0 02 a9 69 40 ce 7b de 32 59 a5 2e 01 52 97 ad aa d8 45 97 a0 d2 05 b5 0e 3e 17 19 f9 7b fa"
++		  "7e e1 d2 66 1f a9 97 9a 5a a2 35 b5 58 a7 e6 d9 f8 8f 98 2d d6 3f c3 5a 8e c0 dd 5e 24 2d 3b df"));
++}
+-- 
+2.49.0
+

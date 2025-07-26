@@ -1,0 +1,206 @@
+From 8a0a625358153724f9e3b8b9c73f4b2d1e8730c6 Mon Sep 17 00:00:00 2001
+From: Dmitry Eremin-Solenikov <dbaryshkov@gmail.com>
+Date: Thu, 11 Jul 2019 21:43:15 +0300
+Subject: [PATCH] Add HMAC functions for GOSTHASH94 and GOSTHASH94CP
+
+GOST hash functions can be used to generate MAC using HMAC algorithm.
+Add functions implementing HMAC with GOSTHASH94/GOSTHASH94CP.
+
+Signed-off-by: Dmitry Eremin-Solenikov <dbaryshkov@gmail.com>
+---
+ Makefile.in           |  5 +--
+ hmac-gosthash94.c     | 79 +++++++++++++++++++++++++++++++++++++++++++
+ hmac.h                | 37 ++++++++++++++++++++
+ testsuite/hmac-test.c | 14 ++++++++
+ 4 files changed, 133 insertions(+), 2 deletions(-)
+ create mode 100644 hmac-gosthash94.c
+
+diff --git a/Makefile.in b/Makefile.in
+index 42cbd9f2..07925583 100644
+--- a/Makefile.in
++++ b/Makefile.in
+@@ -104,8 +104,9 @@ nettle_SOURCES = aes-decrypt-internal.c aes-decrypt.c \
+ 		 gcm-camellia256.c gcm-camellia256-meta.c \
+ 		 cmac.c cmac64.c cmac-aes128.c cmac-aes256.c cmac-des3.c \
+ 		 gost28147.c gosthash94.c gosthash94-meta.c \
+-		 hmac.c hmac-md5.c hmac-ripemd160.c hmac-sha1.c \
+-		 hmac-sha224.c hmac-sha256.c hmac-sha384.c hmac-sha512.c \
++		 hmac.c hmac-gosthash94.c hmac-md5.c hmac-ripemd160.c \
++		 hmac-sha1.c hmac-sha224.c hmac-sha256.c hmac-sha384.c \
++		 hmac-sha512.c \
+ 		 knuth-lfib.c hkdf.c \
+ 		 md2.c md2-meta.c md4.c md4-meta.c \
+ 		 md5.c md5-compress.c md5-compat.c md5-meta.c \
+diff --git a/hmac-gosthash94.c b/hmac-gosthash94.c
+new file mode 100644
+index 00000000..66b62854
+--- /dev/null
++++ b/hmac-gosthash94.c
+@@ -0,0 +1,79 @@
++/* hmac-gosthash94.c
++
++   HMAC-GOSTHASH94 message authentication code.
++
++   Copyright (C) 2016 Dmitry Eremin-Solenikov
++
++   This file is part of GNU Nettle.
++
++   GNU Nettle is free software: you can redistribute it and/or
++   modify it under the terms of either:
++
++     * the GNU Lesser General Public License as published by the Free
++       Software Foundation; either version 3 of the License, or (at your
++       option) any later version.
++
++   or
++
++     * the GNU General Public License as published by the Free
++       Software Foundation; either version 2 of the License, or (at your
++       option) any later version.
++
++   or both in parallel, as here.
++
++   GNU Nettle is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   General Public License for more details.
++
++   You should have received copies of the GNU General Public License and
++   the GNU Lesser General Public License along with this program.  If
++   not, see http://www.gnu.org/licenses/.
++*/
++
++#if HAVE_CONFIG_H
++# include "config.h"
++#endif
++
++#include "hmac.h"
++
++void
++hmac_gosthash94_set_key(struct hmac_gosthash94_ctx *ctx,
++		    size_t key_length, const uint8_t *key)
++{
++  HMAC_SET_KEY(ctx, &nettle_gosthash94, key_length, key);
++}
++
++void
++hmac_gosthash94_update(struct hmac_gosthash94_ctx *ctx,
++		   size_t length, const uint8_t *data)
++{
++  gosthash94_update(&ctx->state, length, data);
++}
++
++void
++hmac_gosthash94_digest(struct hmac_gosthash94_ctx *ctx,
++		   size_t length, uint8_t *digest)
++{
++  HMAC_DIGEST(ctx, &nettle_gosthash94, length, digest);
++}
++
++void
++hmac_gosthash94cp_set_key(struct hmac_gosthash94cp_ctx *ctx,
++		    size_t key_length, const uint8_t *key)
++{
++  HMAC_SET_KEY(ctx, &nettle_gosthash94cp, key_length, key);
++}
++
++void
++hmac_gosthash94cp_update(struct hmac_gosthash94cp_ctx *ctx,
++		   size_t length, const uint8_t *data)
++{
++  gosthash94cp_update(&ctx->state, length, data);
++}
++void
++hmac_gosthash94cp_digest(struct hmac_gosthash94cp_ctx *ctx,
++		   size_t length, uint8_t *digest)
++{
++  HMAC_DIGEST(ctx, &nettle_gosthash94cp, length, digest);
++}
+diff --git a/hmac.h b/hmac.h
+index 40a8e77a..d9ee3400 100644
+--- a/hmac.h
++++ b/hmac.h
+@@ -36,6 +36,7 @@
+ 
+ #include "nettle-meta.h"
+ 
++#include "gosthash94.h"
+ #include "md5.h"
+ #include "ripemd160.h"
+ #include "sha1.h"
+@@ -68,6 +69,12 @@ extern "C" {
+ #define hmac_sha512_set_key nettle_hmac_sha512_set_key
+ #define hmac_sha512_update nettle_hmac_sha512_update
+ #define hmac_sha512_digest nettle_hmac_sha512_digest
++#define hmac_gosthash94_set_key nettle_hmac_gosthash94_set_key
++#define hmac_gosthash94_update nettle_hmac_gosthash94_update
++#define hmac_gosthash94_digest nettle_hmac_gosthash94_digest
++#define hmac_gosthash94cp_set_key nettle_hmac_gosthash94cp_set_key
++#define hmac_gosthash94cp_update nettle_hmac_gosthash94cp_update
++#define hmac_gosthash94cp_digest nettle_hmac_gosthash94cp_digest
+ 
+ void
+ hmac_set_key(void *outer, void *inner, void *state,
+@@ -203,6 +210,36 @@ void
+ hmac_sha384_digest(struct hmac_sha512_ctx *ctx,
+ 		   size_t length, uint8_t *digest);
+ 
++/* hmac-gosthash94 */
++struct hmac_gosthash94_ctx HMAC_CTX(struct gosthash94_ctx);
++
++void
++hmac_gosthash94_set_key(struct hmac_gosthash94_ctx *ctx,
++			size_t key_length, const uint8_t *key);
++
++void
++hmac_gosthash94_update(struct hmac_gosthash94_ctx *ctx,
++		       size_t length, const uint8_t *data);
++
++  void
++hmac_gosthash94_digest(struct hmac_gosthash94_ctx *ctx,
++		       size_t length, uint8_t *digest);
++
++struct hmac_gosthash94cp_ctx HMAC_CTX(struct gosthash94cp_ctx);
++
++void
++hmac_gosthash94cp_set_key(struct hmac_gosthash94cp_ctx *ctx,
++			  size_t key_length, const uint8_t *key);
++
++void
++hmac_gosthash94cp_update(struct hmac_gosthash94cp_ctx *ctx,
++			 size_t length, const uint8_t *data);
++
++void
++hmac_gosthash94cp_digest(struct hmac_gosthash94cp_ctx *ctx,
++			 size_t length, uint8_t *digest);
++
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/testsuite/hmac-test.c b/testsuite/hmac-test.c
+index 9156cc40..f009c800 100644
+--- a/testsuite/hmac-test.c
++++ b/testsuite/hmac-test.c
+@@ -894,4 +894,18 @@ test_main(void)
+ 		 "b1ff68a1de45509fbe4da9a433922655"));
+ 
+   /* Test case AUTH512-3 from same document seems broken. */
++
++  HMAC_TEST(gosthash94,
++	    SHEX("000102030405060708090a0b0c0d0e0f"
++		 "101112131415161718191a1b1c1d1e1f"),
++	    SHEX("0126bdb87800af214341456563780100"),
++	    SHEX("bfebe25f051bfef6ac858babb0abc409"
++		 "bfd2e334ab847bc0b0d056517c7d94c5"));
++
++  HMAC_TEST(gosthash94cp,
++	    SHEX("000102030405060708090a0b0c0d0e0f"
++		 "101112131415161718191a1b1c1d1e1f"),
++	    SHEX("0126bdb87800af214341456563780100"),
++	    SHEX("bad70b61c41095bc47e1141cfaed4272"
++		 "6a5ceebd62ce75dbbb9ad76cda9f72f7"));
+ }
+-- 
+2.49.0
+

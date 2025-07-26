@@ -1,0 +1,422 @@
+From 9aec4abea818f10afdf8e9e744596e3818f24a8e Mon Sep 17 00:00:00 2001
+From: Dmitry Eremin-Solenikov <dbaryshkov@gmail.com>
+Date: Mon, 30 Oct 2017 13:22:01 +0300
+Subject: [PATCH] magma: implement 64-bit algorithm from GOST R 34.12-2015
+
+64-bit algorithm (Magma) from GOST R 34.12-2015 is block algorithm from
+GOST 28147 with fixed S-BOX and LE/BE changes. Implement Magma reusing
+gost28147 implementation.
+
+Signed-off-by: Dmitry Eremin-Solenikov <dbaryshkov@gmail.com>
+---
+ Makefile.in                  |  3 +-
+ examples/nettle-benchmark.c  |  1 +
+ magma-meta.c                 | 49 ++++++++++++++++++++
+ magma.c                      | 86 ++++++++++++++++++++++++++++++++++++
+ magma.h                      | 72 ++++++++++++++++++++++++++++++
+ nettle-meta-ciphers.c        |  1 +
+ nettle-meta.h                |  1 +
+ testsuite/.gitignore         |  1 +
+ testsuite/.test-rules.make   |  3 ++
+ testsuite/Makefile.in        |  2 +-
+ testsuite/magma-test.c       | 51 +++++++++++++++++++++
+ testsuite/meta-cipher-test.c |  1 +
+ 12 files changed, 269 insertions(+), 2 deletions(-)
+ create mode 100644 magma-meta.c
+ create mode 100644 magma.c
+ create mode 100644 magma.h
+ create mode 100644 testsuite/magma-test.c
+
+diff --git a/Makefile.in b/Makefile.in
+index 294dde1c..2323969b 100644
+--- a/Makefile.in
++++ b/Makefile.in
+@@ -109,6 +109,7 @@ nettle_SOURCES = aes-decrypt-internal.c aes-decrypt.c \
+ 		 hmac-sha1.c hmac-sha224.c hmac-sha256.c hmac-sha384.c \
+ 		 hmac-sha512.c hmac-streebog.c \
+ 		 knuth-lfib.c hkdf.c \
++		 magma.c magma-meta.c \
+ 		 md2.c md2-meta.c md4.c md4-meta.c \
+ 		 md5.c md5-compress.c md5-compat.c md5-meta.c \
+ 		 memeql-sec.c memxor.c memxor3.c \
+@@ -208,7 +209,7 @@ HEADERS = aes.h arcfour.h arctwo.h asn1.h blowfish.h \
+ 	  knuth-lfib.h hkdf.h \
+ 	  macros.h \
+ 	  cmac.h siv-cmac.h \
+-	  md2.h md4.h \
++	  magma.h md2.h md4.h \
+ 	  md5.h md5-compat.h \
+ 	  memops.h memxor.h \
+ 	  nettle-meta.h nettle-types.h \
+diff --git a/examples/nettle-benchmark.c b/examples/nettle-benchmark.c
+index ea52cb44..4438465c 100644
+--- a/examples/nettle-benchmark.c
++++ b/examples/nettle-benchmark.c
+@@ -936,6 +936,7 @@ main(int argc, char **argv)
+       &nettle_des3,
+       &nettle_serpent256,
+       &nettle_twofish128, &nettle_twofish192, &nettle_twofish256,
++      &nettle_magma,
+       NULL
+     };
+ 
+diff --git a/magma-meta.c b/magma-meta.c
+new file mode 100644
+index 00000000..617d89a7
+--- /dev/null
++++ b/magma-meta.c
+@@ -0,0 +1,49 @@
++/* magma-meta.c
++
++   Copyright (C) 2017 Dmitry Eremin-Solenikov
++
++   This file is part of GNU Nettle.
++
++   GNU Nettle is free software: you can redistribute it and/or
++   modify it under the terms of either:
++
++     * the GNU Lesser General Public License as published by the Free
++       Software Foundation; either version 3 of the License, or (at your
++       option) any later version.
++
++   or
++
++     * the GNU General Public License as published by the Free
++       Software Foundation; either version 2 of the License, or (at your
++       option) any later version.
++
++   or both in parallel, as here.
++
++   GNU Nettle is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   General Public License for more details.
++
++   You should have received copies of the GNU General Public License and
++   the GNU Lesser General Public License along with this program.  If
++   not, see http://www.gnu.org/licenses/.
++*/
++
++#if HAVE_CONFIG_H
++# include "config.h"
++#endif
++
++#include <assert.h>
++
++#include "nettle-meta.h"
++
++#include "magma.h"
++
++const struct nettle_cipher nettle_magma =
++  { "magma", sizeof(struct magma_ctx),
++    MAGMA_BLOCK_SIZE, MAGMA_KEY_SIZE,
++    (nettle_set_key_func *) magma_set_key,
++    (nettle_set_key_func *) magma_set_key,
++    (nettle_cipher_func *) magma_encrypt,
++    (nettle_cipher_func *) magma_decrypt
++  };
+diff --git a/magma.c b/magma.c
+new file mode 100644
+index 00000000..3c612b2a
+--- /dev/null
++++ b/magma.c
+@@ -0,0 +1,86 @@
++/* magma.c - GOST R 34.12-2015 (Magma) cipher implementation
++ *
++ * Copyright: 2017 Dmitry Eremin-Solenikov <dbaryshkov@gmail.com>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the
++ * "Software"), to deal in the Software without restriction, including
++ * without limitation the rights to use, copy, modify, merge, publish,
++ * distribute, sublicense, and/or sell copies of the Software, and to
++ * permit persons to whom the Software is furnished to do so, subject to
++ * the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included
++ * in all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
++ * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
++ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
++ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
++ * CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
++ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
++ * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
++ */
++
++#if HAVE_CONFIG_H
++#include "config.h"
++#endif
++
++#include <assert.h>
++
++#include "macros.h"
++#include "nettle-write.h"
++#include "magma.h"
++#include "gost28147.h"
++#include "gost28147-internal.h"
++
++void
++magma_set_key(struct magma_ctx *ctx, const uint8_t *key)
++{
++  unsigned i;
++
++  for (i = 0; i < 8; i++, key += 4)
++    ctx->key[i] = READ_UINT32(key);
++}
++
++void
++magma_encrypt(const struct magma_ctx *ctx,
++	      size_t length, uint8_t *dst,
++	      const uint8_t *src)
++{
++  uint32_t block[2];
++
++  assert(!(length % MAGMA_BLOCK_SIZE));
++
++  while (length)
++    {
++      block[1] = READ_UINT32(src); src += 4;
++      block[0] = READ_UINT32(src); src += 4;
++      _gost28147_encrypt_block(ctx->key, gost28147_param_TC26_Z.sbox,
++			       block, block);
++      WRITE_UINT32(dst, block[1]); dst += 4;
++      WRITE_UINT32(dst, block[0]); dst += 4;
++      length -= MAGMA_BLOCK_SIZE;
++    }
++}
++
++void
++magma_decrypt(const struct magma_ctx *ctx,
++	      size_t length, uint8_t *dst,
++	      const uint8_t *src)
++{
++  uint32_t block[2];
++
++  assert(!(length % MAGMA_BLOCK_SIZE));
++
++  while (length)
++    {
++      block[1] = READ_UINT32(src); src += 4;
++      block[0] = READ_UINT32(src); src += 4;
++      _gost28147_decrypt_block(ctx->key, gost28147_param_TC26_Z.sbox,
++			       block, block);
++      WRITE_UINT32(dst, block[1]); dst += 4;
++      WRITE_UINT32(dst, block[0]); dst += 4;
++      length -= MAGMA_BLOCK_SIZE;
++    }
++}
+diff --git a/magma.h b/magma.h
+new file mode 100644
+index 00000000..4de5e26b
+--- /dev/null
++++ b/magma.h
+@@ -0,0 +1,72 @@
++/* magma.h
++
++   The GOST R 34.12-2015 (MAGMA) cipher function.
++
++   Copyright (C) 2017 Dmitry Eremin-Solenikov
++
++   This file is part of GNU Nettle.
++
++   GNU Nettle is free software: you can redistribute it and/or
++   modify it under the terms of either:
++
++     * the GNU Lesser General Public License as published by the Free
++       Software Foundation; either version 3 of the License, or (at your
++       option) any later version.
++
++   or
++
++     * the GNU General Public License as published by the Free
++       Software Foundation; either version 2 of the License, or (at your
++       option) any later version.
++
++   or both in parallel, as here.
++
++   GNU Nettle is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   General Public License for more details.
++
++   You should have received copies of the GNU General Public License and
++   the GNU Lesser General Public License along with this program.  If
++   not, see http://www.gnu.org/licenses/.
++*/
++
++#ifndef NETTLE_MAGMA_H_INCLUDED
++#define NETTLE_MAGMA_H_INCLUDED
++
++#include "nettle-types.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define magma_set_key nettle_magma_set_key
++#define magma_set_param nettle_magma_set_param
++#define magma_encrypt nettle_magma_encrypt
++#define magma_decrypt nettle_magma_decrypt
++
++#define MAGMA_KEY_SIZE 32
++#define MAGMA_BLOCK_SIZE 8
++
++struct magma_ctx
++{
++  uint32_t key[MAGMA_KEY_SIZE/4];
++};
++
++void
++magma_set_key(struct magma_ctx *ctx, const uint8_t *key);
++
++void
++magma_encrypt(const struct magma_ctx *ctx,
++	      size_t length, uint8_t *dst,
++	      const uint8_t *src);
++void
++magma_decrypt(const struct magma_ctx *ctx,
++	      size_t length, uint8_t *dst,
++	      const uint8_t *src);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* NETTLE_MAGMA_H_INCLUDED */
+diff --git a/nettle-meta-ciphers.c b/nettle-meta-ciphers.c
+index 3a48f2f4..ff31bccf 100644
+--- a/nettle-meta-ciphers.c
++++ b/nettle-meta-ciphers.c
+@@ -55,6 +55,7 @@ const struct nettle_cipher * const _nettle_ciphers[] = {
+   &nettle_arctwo128,
+   &nettle_arctwo_gutmann128,
+   &nettle_gost28147,
++  &nettle_magma,
+   NULL
+ };
+ 
+diff --git a/nettle-meta.h b/nettle-meta.h
+index db46d13c..bb7dda51 100644
+--- a/nettle-meta.h
++++ b/nettle-meta.h
+@@ -90,6 +90,7 @@ extern const struct nettle_cipher nettle_arctwo128;
+ extern const struct nettle_cipher nettle_arctwo_gutmann128;
+ 
+ extern const struct nettle_cipher nettle_gost28147;
++extern const struct nettle_cipher nettle_magma;
+ 
+ struct nettle_hash
+ {
+diff --git a/testsuite/.gitignore b/testsuite/.gitignore
+index 802d82bd..ab1ede3a 100644
+--- a/testsuite/.gitignore
++++ b/testsuite/.gitignore
+@@ -51,6 +51,7 @@
+ /hkdf-test
+ /hmac-test
+ /knuth-lfib-test
++/magma-test
+ /md2-test
+ /md4-test
+ /md5-compat-test
+diff --git a/testsuite/.test-rules.make b/testsuite/.test-rules.make
+index 899cab3a..06394461 100644
+--- a/testsuite/.test-rules.make
++++ b/testsuite/.test-rules.make
+@@ -37,6 +37,9 @@ des3-test$(EXEEXT): des3-test.$(OBJEXT)
+ gost28147-test$(EXEEXT): gost28147-test.$(OBJEXT)
+ 	$(LINK) gost28147-test.$(OBJEXT) $(TEST_OBJS) -o gost28147-test$(EXEEXT)
+ 
++magma-test$(EXEEXT): magma-test.$(OBJEXT)
++	$(LINK) magma-test.$(OBJEXT) $(TEST_OBJS) -o magma-test$(EXEEXT)
++
+ md2-test$(EXEEXT): md2-test.$(OBJEXT)
+ 	$(LINK) md2-test.$(OBJEXT) $(TEST_OBJS) -o md2-test$(EXEEXT)
+ 
+diff --git a/testsuite/Makefile.in b/testsuite/Makefile.in
+index 1c407bd1..5833ee0c 100644
+--- a/testsuite/Makefile.in
++++ b/testsuite/Makefile.in
+@@ -16,7 +16,7 @@ TS_NETTLE_SOURCES = aes-test.c arcfour-test.c arctwo-test.c \
+ 		    camellia-test.c chacha-test.c \
+ 		    cnd-memcpy-test.c \
+ 		    des-test.c des3-test.c \
+-		    gost28147-test.c \
++		    gost28147-test.c magma-test.c \
+ 		    md2-test.c md4-test.c md5-test.c md5-compat-test.c \
+ 		    memeql-test.c memxor-test.c gosthash94-test.c \
+ 		    ripemd160-test.c hkdf-test.c \
+diff --git a/testsuite/magma-test.c b/testsuite/magma-test.c
+new file mode 100644
+index 00000000..5dc698d1
+--- /dev/null
++++ b/testsuite/magma-test.c
+@@ -0,0 +1,51 @@
++#include "testutils.h"
++#include "magma.h"
++#include "cfb.h"
++
++void test_main(void)
++{
++  test_cipher(&nettle_magma,
++      SHEX("ffeeddccbbaa99887766554433221100f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff"),
++      SHEX("92def06b3c130a59 db54c704f8189d20 4a98fb2e67a8024c 8912409b17b57e41"),
++      SHEX("2b073f0494f372a0 de70e715d3556e48 11d8d9e9eacfbc1e 7c68260996c67efb"));
++
++  test_cipher(&nettle_magma,
++      SHEX("ffeeddccbbaa99887766554433221100f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff"),
++      SHEX("fedcba9876543210"),
++      SHEX("4ee901e5c2d8ca3d"));
++
++  test_cipher(&nettle_magma,
++      SHEX("8899aabbccddeeff0011223344556677fedcba98765432100123456789abcdef"),
++      SHEX("1234567800000000"),
++      SHEX("3b9a2eaabe783bab"));
++
++  test_cipher(&nettle_magma,
++      SHEX("8899aabbccddeeff0011223344556677fedcba98765432100123456789abcdef"),
++      SHEX("1234567800000001"),
++      SHEX("970fd90806c10d62"));
++
++  test_cipher(&nettle_magma,
++      SHEX("863ea017842c3d372b18a85a28e2317d74befc107720de0c9e8ab974abd00ca0"),
++      SHEX("1234567800000002"),
++      SHEX("c73d459c287b3d1c"));
++
++  test_cipher(&nettle_magma,
++      SHEX("863ea017842c3d372b18a85a28e2317d74befc107720de0c9e8ab974abd00ca0"),
++      SHEX("1234567800000003"),
++      SHEX("86361cacbc1f4c24"));
++
++  test_cipher(&nettle_magma,
++      SHEX("49a5e2677de555982b8ad5e826652d17eec847bf5b3997a81cf7fe7f1187bd27"),
++      SHEX("1234567800000004"),
++      SHEX("b08c4250cb8b640a"));
++
++  test_cipher(&nettle_magma,
++      SHEX("49a5e2677de555982b8ad5e826652d17eec847bf5b3997a81cf7fe7f1187bd27"),
++      SHEX("1234567800000005"),
++      SHEX("327edcd4e88de66f"));
++
++  test_cipher(&nettle_magma,
++      SHEX("3256bf3f97b5667426a9fb1c5eaabe41893ccdd5a868f9b63b0aa90720fa43c4"),
++      SHEX("1234567800000006"),
++      SHEX("a691b50e59bdfa58"));
++}
+diff --git a/testsuite/meta-cipher-test.c b/testsuite/meta-cipher-test.c
+index 8c435cb5..4d93c5f1 100644
+--- a/testsuite/meta-cipher-test.c
++++ b/testsuite/meta-cipher-test.c
+@@ -14,6 +14,7 @@ const char* ciphers[] = {
+   "camellia256",
+   "cast128",
+   "gost28147",
++  "magma",
+   "serpent128",
+   "serpent192",
+   "serpent256",
+-- 
+2.49.0
+

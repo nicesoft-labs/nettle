@@ -1,0 +1,38 @@
+From 26cfb122f82fdf9f3d40c2d4d90edc5c535bcbf2 Mon Sep 17 00:00:00 2001
+From: Dmitry Eremin-Solenikov <dbaryshkov@gmail.com>
+Date: Fri, 4 Dec 2015 00:01:03 +0300
+Subject: [PATCH] Add GOST R 34.11 to nettle_hashes
+
+Signed-off-by: Dmitry Eremin-Solenikov <dbaryshkov@gmail.com>
+---
+ nettle-meta-hashes.c       | 1 +
+ testsuite/meta-hash-test.c | 1 +
+ 2 files changed, 2 insertions(+)
+
+diff --git a/nettle-meta-hashes.c b/nettle-meta-hashes.c
+index 27b576cd..3e2f1e56 100644
+--- a/nettle-meta-hashes.c
++++ b/nettle-meta-hashes.c
+@@ -43,6 +43,7 @@ const struct nettle_hash * const _nettle_hashes[] = {
+   &nettle_md2,
+   &nettle_md4,
+   &nettle_md5,
++  &nettle_gosthash94,
+   &nettle_ripemd160,
+   &nettle_sha1,
+   &nettle_sha224,
+diff --git a/testsuite/meta-hash-test.c b/testsuite/meta-hash-test.c
+index 7d863a7c..b8389761 100644
+--- a/testsuite/meta-hash-test.c
++++ b/testsuite/meta-hash-test.c
+@@ -10,6 +10,7 @@ const char* hashes[] = {
+   "md2",
+   "md4",
+   "md5",
++  "gosthash94",
+   "ripemd160",
+   "sha1",
+   "sha224",
+-- 
+2.49.0
+

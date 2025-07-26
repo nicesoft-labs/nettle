@@ -1,0 +1,161 @@
+From e3d54eeb6b2e01674ddcb71eefe21b55b95945b8 Mon Sep 17 00:00:00 2001
+From: Dmitry Eremin-Solenikov <dbaryshkov@gmail.com>
+Date: Thu, 11 Jul 2019 21:43:16 +0300
+Subject: [PATCH] Add PBKDF2 support for gosthash94cp
+
+Russian technical comitee working on standartization of cryptography
+algorithms has published the document describing usage of GOST R
+34.11-94 hash function with PBKDF2 algorithm (MR 26.2.001-2012).
+Add test vectors from that document and a special function implementing
+Nettle interface for PBKDF2 using gosthash94cp.
+
+Signed-off-by: Dmitry Eremin-Solenikov <dbaryshkov@gmail.com>
+---
+ Makefile.in              |  3 ++-
+ pbkdf2-hmac-gosthash94.c | 53 ++++++++++++++++++++++++++++++++++++++++
+ pbkdf2.h                 |  7 ++++++
+ testsuite/pbkdf2-test.c  | 24 ++++++++++++++++++
+ 4 files changed, 86 insertions(+), 1 deletion(-)
+ create mode 100644 pbkdf2-hmac-gosthash94.c
+
+diff --git a/Makefile.in b/Makefile.in
+index 07925583..9f5b065a 100644
+--- a/Makefile.in
++++ b/Makefile.in
+@@ -114,7 +114,8 @@ nettle_SOURCES = aes-decrypt-internal.c aes-decrypt.c \
+ 		 nettle-lookup-hash.c \
+ 		 nettle-meta-aeads.c nettle-meta-armors.c \
+ 		 nettle-meta-ciphers.c nettle-meta-hashes.c \
+-		 pbkdf2.c pbkdf2-hmac-sha1.c pbkdf2-hmac-sha256.c \
++		 pbkdf2.c pbkdf2-hmac-gosthash94.c pbkdf2-hmac-sha1.c \
++		 pbkdf2-hmac-sha256.c \
+ 		 poly1305-aes.c poly1305-internal.c \
+ 		 realloc.c \
+ 		 ripemd160.c ripemd160-compress.c ripemd160-meta.c \
+diff --git a/pbkdf2-hmac-gosthash94.c b/pbkdf2-hmac-gosthash94.c
+new file mode 100644
+index 00000000..bf616594
+--- /dev/null
++++ b/pbkdf2-hmac-gosthash94.c
+@@ -0,0 +1,53 @@
++/* pbkdf2-hmac-gosthash94.c
++
++   PKCS #5 PBKDF2 used with HMAC-GOSTHASH94CP.
++
++   Copyright (C) 2016 Dmitry Eremin-Solenikov
++
++   This file is part of GNU Nettle.
++
++   GNU Nettle is free software: you can redistribute it and/or
++   modify it under the terms of either:
++
++     * the GNU Lesser General Public License as published by the Free
++       Software Foundation; either version 3 of the License, or (at your
++       option) any later version.
++
++   or
++
++     * the GNU General Public License as published by the Free
++       Software Foundation; either version 2 of the License, or (at your
++       option) any later version.
++
++   or both in parallel, as here.
++
++   GNU Nettle is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   General Public License for more details.
++
++   You should have received copies of the GNU General Public License and
++   the GNU Lesser General Public License along with this program.  If
++   not, see http://www.gnu.org/licenses/.
++*/
++
++#if HAVE_CONFIG_H
++# include "config.h"
++#endif
++
++#include "pbkdf2.h"
++
++#include "hmac.h"
++
++void
++pbkdf2_hmac_gosthash94cp (size_t key_length, const uint8_t *key,
++		  unsigned iterations,
++		  size_t salt_length, const uint8_t *salt,
++		  size_t length, uint8_t *dst)
++{
++  struct hmac_gosthash94cp_ctx gosthash94cpctx;
++
++  hmac_gosthash94cp_set_key (&gosthash94cpctx, key_length, key);
++  PBKDF2 (&gosthash94cpctx, hmac_gosthash94cp_update, hmac_gosthash94cp_digest,
++	  GOSTHASH94CP_DIGEST_SIZE, iterations, salt_length, salt, length, dst);
++}
+diff --git a/pbkdf2.h b/pbkdf2.h
+index 7b1c4c9c..a36dfdba 100644
+--- a/pbkdf2.h
++++ b/pbkdf2.h
+@@ -45,6 +45,7 @@ extern "C"
+ #define pbkdf2 nettle_pbkdf2
+ #define pbkdf2_hmac_sha1 nettle_pbkdf2_hmac_sha1
+ #define pbkdf2_hmac_sha256 nettle_pbkdf2_hmac_sha256
++#define pbkdf2_hmac_gosthash94cp nettle_pbkdf2_hmac_gosthash94cp
+ 
+ void
+ pbkdf2 (void *mac_ctx,
+@@ -78,6 +79,12 @@ pbkdf2_hmac_sha256 (size_t key_length, const uint8_t *key,
+ 		    size_t salt_length, const uint8_t *salt,
+ 		    size_t length, uint8_t *dst);
+ 
++void
++pbkdf2_hmac_gosthash94cp (size_t key_length, const uint8_t *key,
++			  unsigned iterations,
++			  size_t salt_length, const uint8_t *salt,
++			  size_t length, uint8_t *dst);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/testsuite/pbkdf2-test.c b/testsuite/pbkdf2-test.c
+index bb8da57f..e64a20d0 100644
+--- a/testsuite/pbkdf2-test.c
++++ b/testsuite/pbkdf2-test.c
+@@ -28,6 +28,7 @@ test_main (void)
+   struct hmac_sha1_ctx sha1ctx;
+   struct hmac_sha256_ctx sha256ctx;
+   struct hmac_sha512_ctx sha512ctx;
++  struct hmac_gosthash94cp_ctx gosthash94cpctx;
+ 
+   /* Test vectors for PBKDF2 from RFC 6070. */
+ 
+@@ -110,4 +111,27 @@ test_main (void)
+   PBKDF2_HMAC_TEST(pbkdf2_hmac_sha256, LDATA("passwd"), 1, LDATA("salt"),
+ 		   SHEX("55ac046e56e3089fec1691c22544b605"));
+ 
++  /* From TC26 document, MR 26.2.001-2012 */
++
++  hmac_gosthash94cp_set_key (&gosthash94cpctx, LDATA("password"));
++  PBKDF2_TEST (&gosthash94cpctx, hmac_gosthash94cp_update, hmac_gosthash94cp_digest,
++	       GOSTHASH94CP_DIGEST_SIZE, 1, LDATA("salt"),
++	       SHEX("7314e7c04fb2e662c543674253f68bd0b73445d07f241bed872882da21662d58"));
++
++  PBKDF2_TEST (&gosthash94cpctx, hmac_gosthash94cp_update, hmac_gosthash94cp_digest,
++	       GOSTHASH94CP_DIGEST_SIZE, 4096, LDATA("salt"),
++	       SHEX("1f1829a94bdff5be10d0aeb36af498e7a97467f3b31116a5a7c1afff9deadafe"));
++
++  hmac_gosthash94cp_set_key (&gosthash94cpctx, LDATA("passwordPASSWORDpassword"));
++  PBKDF2_TEST (&gosthash94cpctx, hmac_gosthash94cp_update, hmac_gosthash94cp_digest,
++	       GOSTHASH94CP_DIGEST_SIZE, 4096, LDATA("saltSALTsaltSALTsaltSALTsaltSALTsalt"),
++	       SHEX("788358c69cb2dbe251a7bb17d5f4241f265a792a35becde8d56f326b49c85047b7638acb4764b1fd"));
++
++  hmac_gosthash94cp_set_key (&gosthash94cpctx, LDATA("pass\0word"));
++  PBKDF2_TEST (&gosthash94cpctx, hmac_gosthash94cp_update, hmac_gosthash94cp_digest,
++	       GOSTHASH94CP_DIGEST_SIZE, 4096, LDATA("sa\0lt"),
++	       SHEX("43e06c5590b08c0225242373127edf9c8e9c3291"));
++
++  PBKDF2_HMAC_TEST (pbkdf2_hmac_gosthash94cp, LDATA("password"), 1, LDATA("salt"),
++	       SHEX("7314e7c04fb2e662c543674253f68bd0b73445d07f241bed872882da21662d58"));
+ }
+-- 
+2.49.0
+

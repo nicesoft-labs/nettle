@@ -1,0 +1,42 @@
+From ee2c0aa8dcdf40901a727c6a44dfa02c8c0039b0 Mon Sep 17 00:00:00 2001
+From: Dmitry Eremin-Solenikov <dbaryshkov@gmail.com>
+Date: Thu, 11 Jul 2019 21:43:14 +0300
+Subject: [PATCH] Add GOST R 34.11-94 to nettle_hashes
+
+Add entries for gosthash94 and gosthash94cp in nettle_hashes array.
+
+Signed-off-by: Dmitry Eremin-Solenikov <dbaryshkov@gmail.com>
+---
+ nettle-meta-hashes.c       | 2 ++
+ testsuite/meta-hash-test.c | 2 ++
+ 2 files changed, 4 insertions(+)
+
+diff --git a/nettle-meta-hashes.c b/nettle-meta-hashes.c
+index 37552ede..27b576cd 100644
+--- a/nettle-meta-hashes.c
++++ b/nettle-meta-hashes.c
+@@ -38,6 +38,8 @@
+ #include "nettle-meta.h"
+ 
+ const struct nettle_hash * const _nettle_hashes[] = {
++  &nettle_gosthash94,
++  &nettle_gosthash94cp,
+   &nettle_md2,
+   &nettle_md4,
+   &nettle_md5,
+diff --git a/testsuite/meta-hash-test.c b/testsuite/meta-hash-test.c
+index 4754f665..7d863a7c 100644
+--- a/testsuite/meta-hash-test.c
++++ b/testsuite/meta-hash-test.c
+@@ -5,6 +5,8 @@
+ #include "sha3.h"
+ 
+ const char* hashes[] = {
++  "gosthash94",
++  "gosthash94cp",
+   "md2",
+   "md4",
+   "md5",
+-- 
+2.49.0
+

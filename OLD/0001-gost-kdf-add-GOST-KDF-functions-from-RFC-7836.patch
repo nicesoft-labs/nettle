@@ -1,0 +1,331 @@
+From c895a819085f1f5f01033b12a2f436a67e4b4c9a Mon Sep 17 00:00:00 2001
+From: Dmitry Eremin-Solenikov <dbaryshkov@gmail.com>
+Date: Wed, 16 Oct 2019 17:40:38 +0300
+Subject: [PATCH] gost-kdf: add GOST KDF functions from RFC 7836
+
+Signed-off-by: Dmitry Eremin-Solenikov <dbaryshkov@gmail.com>
+---
+ Makefile.in                |   4 +-
+ gost-kdf.c                 | 114 +++++++++++++++++++++++++++++++++++++
+ gost-kdf.h                 |  50 ++++++++++++++++
+ testsuite/.test-rules.make |   3 +
+ testsuite/Makefile.in      |   2 +-
+ testsuite/gost-kdf-test.c  |  79 +++++++++++++++++++++++++
+ 6 files changed, 249 insertions(+), 3 deletions(-)
+ create mode 100644 gost-kdf.c
+ create mode 100644 gost-kdf.h
+ create mode 100644 testsuite/gost-kdf-test.c
+
+diff --git a/Makefile.in b/Makefile.in
+index cf16403a..0242f708 100644
+--- a/Makefile.in
++++ b/Makefile.in
+@@ -104,7 +104,7 @@ nettle_SOURCES = acpkm.c aes-decrypt-internal.c aes-decrypt.c \
+ 		 gcm-camellia256.c gcm-camellia256-meta.c \
+ 		 cmac.c cmac64.c cmac-aes128.c cmac-aes256.c cmac-des3.c \
+ 		 cmac-kuznyechik.c cmac-magma.c \
+-		 gost28147.c gost28147-meta.c gost-wrap.c \
++		 gost28147.c gost28147-meta.c gost-kdf.c gost-wrap.c \
+ 		 gosthash94.c gosthash94-meta.c \
+ 		 hmac.c hmac-gosthash94.c hmac-md5.c hmac-ripemd160.c \
+ 		 hmac-sha1.c hmac-sha224.c hmac-sha256.c hmac-sha384.c \
+@@ -209,7 +209,7 @@ HEADERS = acpkm.h aes.h arcfour.h arctwo.h asn1.h blowfish.h \
+ 	  cbc.h ccm.h cfb.h chacha.h chacha-poly1305.h ctr.h \
+ 	  curve25519.h des.h dsa.h dsa-compat.h eax.h \
+ 	  ecc-curve.h ecc.h ecdsa.h eddsa.h \
+-	  gcm.h gost28147.h gostdsa.h gosthash94.h hmac.h \
++	  gcm.h gost28147.h gost-kdf.h gostdsa.h gosthash94.h hmac.h \
+ 	  knuth-lfib.h hkdf.h \
+ 	  kuznyechik.h \
+ 	  macros.h \
+diff --git a/gost-kdf.c b/gost-kdf.c
+new file mode 100644
+index 00000000..7c56d101
+--- /dev/null
++++ b/gost-kdf.c
+@@ -0,0 +1,114 @@
++/*
++ * Copyright (C) 2019 Dmitry Eremin-Solenikov
++
++   This file is part of GNU Nettle.
++
++   GNU Nettle is free software: you can redistribute it and/or
++   modify it under the terms of either:
++
++     * the GNU Lesser General Public License as published by the Free
++       Software Foundation; either version 3 of the License, or (at your
++       option) any later version.
++
++   or
++
++     * the GNU General Public License as published by the Free
++       Software Foundation; either version 2 of the License, or (at your
++       option) any later version.
++
++   or both in parallel, as here.
++
++   GNU Nettle is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   General Public License for more details.
++
++   You should have received copies of the GNU General Public License and
++   the GNU Lesser General Public License along with this program.  If
++   not, see http://www.gnu.org/licenses/.
++ */
++
++#if HAVE_CONFIG_H
++# include "config.h"
++#endif
++
++#include "hmac.h"
++#include "macros.h"
++#include "gost-kdf.h"
++
++/* See RFC 7836 */
++static void
++kdf_tree_gostr3411_2012_256_single (struct hmac_streebog256_ctx *ctx,
++				    size_t i_length, const uint8_t *i,
++				    size_t label_length, const uint8_t *label,
++				    size_t seed_length, const uint8_t *seed,
++				    size_t l_length, const uint8_t *l,
++				    size_t length, uint8_t *out)
++{
++  /* i label 0x00 seed l */
++  uint8_t data[] = { 0x00 };
++
++  hmac_streebog256_update(ctx, i_length, i);
++  hmac_streebog256_update(ctx, label_length, label);
++  hmac_streebog256_update(ctx, 1, data);
++  hmac_streebog256_update(ctx, seed_length, seed);
++  hmac_streebog256_update(ctx, l_length, l);
++
++  hmac_streebog256_digest(ctx, length, out);
++}
++
++void
++kdf_gostr3411_2012_256 (size_t key_length, const uint8_t *key,
++			size_t label_length, const uint8_t *label,
++			size_t seed_length, const uint8_t *seed,
++			size_t length, uint8_t *out)
++{
++  struct hmac_streebog256_ctx ctx;
++  uint8_t data1[] = { 0x01 };
++  uint8_t data2[] = { 0x01, 0x00 };
++
++  hmac_streebog256_set_key(&ctx, key_length, key);
++  kdf_tree_gostr3411_2012_256_single (&ctx,
++				     sizeof(data1), data1,
++				     label_length, label,
++				     seed_length, seed,
++				     sizeof(data2), data2,
++				     length, out);
++}
++
++void
++kdf_tree_gostr3411_2012_256 (size_t key_length, const uint8_t *key,
++			     size_t label_length, const uint8_t *label,
++			     size_t seed_length, const uint8_t *seed,
++			     size_t r,
++			     size_t length, uint8_t *out)
++{
++  size_t i;
++  uint8_t i_block[4], l_block[8];
++  struct hmac_streebog256_ctx ctx;
++  size_t l_length, l_off;
++  size_t i_off = 4 - r;
++
++  hmac_streebog256_set_key(&ctx, key_length, key);
++  WRITE_UINT64(l_block, length * 8ULL);
++  for (i = 0; i < 8; i++)
++    {
++      if (l_block[i] != 0)
++	break;
++    }
++  l_off = i;
++  l_length = 8 - l_off;
++  for (i = 1; length > 0; i++)
++    {
++      size_t block = length > 32 ? 32 : length;
++      WRITE_UINT32(i_block, i);
++      kdf_tree_gostr3411_2012_256_single(&ctx,
++					 r, i_block + i_off,
++					 label_length, label,
++					 seed_length, seed,
++					 l_length, l_block + l_off,
++					 block, out);
++      out += block;
++      length -= block;
++    }
++}
+diff --git a/gost-kdf.h b/gost-kdf.h
+new file mode 100644
+index 00000000..16456659
+--- /dev/null
++++ b/gost-kdf.h
+@@ -0,0 +1,50 @@
++/*
++ * Copyright (C) 2019 Dmitry Eremin-Solenikov
++
++   This file is part of GNU Nettle.
++
++   GNU Nettle is free software: you can redistribute it and/or
++   modify it under the terms of either:
++
++     * the GNU Lesser General Public License as published by the Free
++       Software Foundation; either version 3 of the License, or (at your
++       option) any later version.
++
++   or
++
++     * the GNU General Public License as published by the Free
++       Software Foundation; either version 2 of the License, or (at your
++       option) any later version.
++
++   or both in parallel, as here.
++
++   GNU Nettle is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   General Public License for more details.
++
++   You should have received copies of the GNU General Public License and
++   the GNU Lesser General Public License along with this program.  If
++   not, see http://www.gnu.org/licenses/.
++ */
++
++#ifndef GOST_KDF_H_INCLUDED
++#define GOST_KDF_H_INCLUDED
++
++#define kdf_gostr3411_2012_256 nettle_kdf_gostr3411_2012_256
++#define kdf_tree_gostr3411_2012_256 nettle_kdf_tree_gostr3411_2012_256
++
++void
++kdf_gostr3411_2012_256 (size_t key_length, const uint8_t *key,
++			size_t label_length, const uint8_t *label,
++			size_t seed_length, const uint8_t *seed,
++			size_t length, uint8_t *out);
++
++void
++kdf_tree_gostr3411_2012_256 (size_t key_length, const uint8_t *key,
++			     size_t label_length, const uint8_t *label,
++			     size_t seed_length, const uint8_t *seed,
++			     size_t r,
++			     size_t length, uint8_t *out);
++
++#endif
+diff --git a/testsuite/.test-rules.make b/testsuite/.test-rules.make
+index 13660431..38232690 100644
+--- a/testsuite/.test-rules.make
++++ b/testsuite/.test-rules.make
+@@ -40,6 +40,9 @@ des3-test$(EXEEXT): des3-test.$(OBJEXT)
+ gost28147-test$(EXEEXT): gost28147-test.$(OBJEXT)
+ 	$(LINK) gost28147-test.$(OBJEXT) $(TEST_OBJS) -o gost28147-test$(EXEEXT)
+ 
++gost-kdf-test$(EXEEXT): gost-kdf-test.$(OBJEXT)
++	$(LINK) gost-kdf-test.$(OBJEXT) $(TEST_OBJS) -o gost-kdf-test$(EXEEXT)
++
+ kuznyechik-test$(EXEEXT): kuznyechik-test.$(OBJEXT)
+ 	$(LINK) kuznyechik-test.$(OBJEXT) $(TEST_OBJS) -o kuznyechik-test$(EXEEXT)
+ 
+diff --git a/testsuite/Makefile.in b/testsuite/Makefile.in
+index 70da3268..cb697726 100644
+--- a/testsuite/Makefile.in
++++ b/testsuite/Makefile.in
+@@ -16,7 +16,7 @@ TS_NETTLE_SOURCES = acpkm-test.c aes-test.c arcfour-test.c arctwo-test.c \
+ 		    camellia-test.c chacha-test.c \
+ 		    cnd-memcpy-test.c \
+ 		    des-test.c des3-test.c \
+-		    gost28147-test.c kuznyechik-test.c magma-test.c \
++		    gost28147-test.c gost-kdf-test.c kuznyechik-test.c magma-test.c \
+ 		    md2-test.c md4-test.c md5-test.c md5-compat-test.c \
+ 		    memeql-test.c memxor-test.c gosthash94-test.c \
+ 		    mgm-test.c \
+diff --git a/testsuite/gost-kdf-test.c b/testsuite/gost-kdf-test.c
+new file mode 100644
+index 00000000..be3096a6
+--- /dev/null
++++ b/testsuite/gost-kdf-test.c
+@@ -0,0 +1,79 @@
++#include "testutils.h"
++#include "gost-kdf.h"
++#include <assert.h>
++
++void test_main(void)
++{
++  const struct tstring *kin =
++    SHEX("000102030405060708090a0b0c0d0e0f"
++         "101112131415161718191a1b1c1d1e1f");
++  const struct tstring *label =
++    SHEX("26bdb878");
++  const struct tstring *seed =
++    SHEX("af21434145656378");
++
++  const struct tstring *kdf_out =
++    SHEX("a1aa5f7de402d7b3 d323f2991c8d4534"
++	 "013137010a83754f d0af6d7cd4922ed9");
++
++  const struct tstring *kdf_tree_out =
++    SHEX("22b6837845c6bef6 5ea71672b2658310"
++	 "86d3c76aebe6dae9 1cad51d83f79d16b"
++	 "074c9330599d7f8d 712fca54392f4ddd"
++	 "e93751206b3584c8 f43f9e6dc51531f9");
++
++  uint8_t outbuf[64];
++
++  assert(kdf_out->length <= sizeof(outbuf));
++  kdf_gostr3411_2012_256(kin->length, kin->data,
++			 label->length, label->data,
++			 seed->length, seed->data,
++			 kdf_out->length, outbuf);
++
++  if (!MEMEQ(kdf_out->length, kdf_out->data, outbuf))
++    {
++      fprintf(stderr, "kdf_gostr3411_2012_256 failed:\n");
++      fprintf(stderr, "\nOutput: ");
++      print_hex(kdf_out->length, outbuf);
++      fprintf(stderr, "\nExpected:");
++      tstring_print_hex(kdf_out);
++      fprintf(stderr, "\n");
++      FAIL();
++    }
++
++  assert(kdf_out->length <= sizeof(outbuf));
++  kdf_tree_gostr3411_2012_256(kin->length, kin->data,
++			      label->length, label->data,
++			      seed->length, seed->data,
++			      1,
++			      kdf_out->length, outbuf);
++
++  if (!MEMEQ(kdf_out->length, kdf_out->data, outbuf))
++    {
++      fprintf(stderr, "kdf_tree_gostr3411_2012_256 failed:\n");
++      fprintf(stderr, "\nOutput: ");
++      print_hex(kdf_out->length, outbuf);
++      fprintf(stderr, "\nExpected:");
++      tstring_print_hex(kdf_out);
++      fprintf(stderr, "\n");
++      FAIL();
++    }
++
++  assert(kdf_tree_out->length <= sizeof(outbuf));
++  kdf_tree_gostr3411_2012_256(kin->length, kin->data,
++			      label->length, label->data,
++			      seed->length, seed->data,
++			      1,
++			      kdf_tree_out->length, outbuf);
++
++  if (!MEMEQ(kdf_tree_out->length, kdf_tree_out->data, outbuf))
++    {
++      fprintf(stderr, "kdf_tree_gostr3411_2012_256 failed:\n");
++      fprintf(stderr, "\nOutput: ");
++      print_hex(kdf_tree_out->length, outbuf);
++      fprintf(stderr, "\nExpected:");
++      tstring_print_hex(kdf_tree_out);
++      fprintf(stderr, "\n");
++      FAIL();
++    }
++}
+-- 
+2.49.0
+

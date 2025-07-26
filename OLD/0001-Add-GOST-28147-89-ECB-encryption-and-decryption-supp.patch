@@ -1,0 +1,509 @@
+From 71f99eed9aef476c176cc541022078a48ac6d865 Mon Sep 17 00:00:00 2001
+From: Dmitry Eremin-Solenikov <dbaryshkov@gmail.com>
+Date: Fri, 28 Oct 2016 02:55:11 +0300
+Subject: [PATCH] Add GOST 28147-89 ECB encryption and decryption support
+
+Signed-off-by: Dmitry Eremin-Solenikov <dbaryshkov@gmail.com>
+---
+ Makefile.in                  |   3 +-
+ gost28147-internal.h         |   3 +
+ gost28147-meta.c             |  49 +++++++++++++++
+ gost28147.c                  |  85 +++++++++++++++++++++++++
+ gost28147.h                  |  30 +++++++++
+ nettle-meta-ciphers.c        |   1 +
+ nettle-meta.h                |   2 +
+ nettle.texinfo               |  38 +++++++++++
+ testsuite/.gitignore         |   1 +
+ testsuite/.test-rules.make   |   3 +
+ testsuite/Makefile.in        |   1 +
+ testsuite/gost28147-test.c   | 119 +++++++++++++++++++++++++++++++++++
+ testsuite/meta-cipher-test.c |   1 +
+ 13 files changed, 335 insertions(+), 1 deletion(-)
+ create mode 100644 gost28147-meta.c
+ create mode 100644 testsuite/gost28147-test.c
+
+diff --git a/Makefile.in b/Makefile.in
+index 9f5b065a..c6e40a74 100644
+--- a/Makefile.in
++++ b/Makefile.in
+@@ -103,7 +103,8 @@ nettle_SOURCES = aes-decrypt-internal.c aes-decrypt.c \
+ 		 gcm-camellia128.c gcm-camellia128-meta.c \
+ 		 gcm-camellia256.c gcm-camellia256-meta.c \
+ 		 cmac.c cmac64.c cmac-aes128.c cmac-aes256.c cmac-des3.c \
+-		 gost28147.c gosthash94.c gosthash94-meta.c \
++		 gost28147.c gost28147-meta.c \
++		 gosthash94.c gosthash94-meta.c \
+ 		 hmac.c hmac-gosthash94.c hmac-md5.c hmac-ripemd160.c \
+ 		 hmac-sha1.c hmac-sha224.c hmac-sha256.c hmac-sha384.c \
+ 		 hmac-sha512.c \
+diff --git a/gost28147-internal.h b/gost28147-internal.h
+index 7f5c6f8c..2c3f5857 100644
+--- a/gost28147-internal.h
++++ b/gost28147-internal.h
+@@ -35,8 +35,11 @@
+ #define NETTLE_GOST28147_INTERNAL_H_INCLUDED
+ 
+ #define _gost28147_encrypt_block _nettle_gost28147_encrypt_block
++#define _gost28147_decrypt_block _nettle_gost28147_decrypt_block
+ 
+ void _gost28147_encrypt_block (const uint32_t *key, const uint32_t sbox[4][256],
+ 			       const uint32_t *in, uint32_t *out);
++void _gost28147_decrypt_block (const uint32_t *key, const uint32_t sbox[4][256],
++			       const uint32_t *in, uint32_t *out);
+ 
+ #endif /* NETTLE_GOST28147_INTERNAL_H_INCLUDED */
+diff --git a/gost28147-meta.c b/gost28147-meta.c
+new file mode 100644
+index 00000000..69e4d265
+--- /dev/null
++++ b/gost28147-meta.c
+@@ -0,0 +1,49 @@
++/* gost28147-meta.c
++
++   Copyright (C) 2016 Dmitry Eremin-Solenikov
++
++   This file is part of GNU Nettle.
++
++   GNU Nettle is free software: you can redistribute it and/or
++   modify it under the terms of either:
++
++     * the GNU Lesser General Public License as published by the Free
++       Software Foundation; either version 3 of the License, or (at your
++       option) any later version.
++
++   or
++
++     * the GNU General Public License as published by the Free
++       Software Foundation; either version 2 of the License, or (at your
++       option) any later version.
++
++   or both in parallel, as here.
++
++   GNU Nettle is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   General Public License for more details.
++
++   You should have received copies of the GNU General Public License and
++   the GNU Lesser General Public License along with this program.  If
++   not, see http://www.gnu.org/licenses/.
++*/
++
++#if HAVE_CONFIG_H
++# include "config.h"
++#endif
++
++#include <assert.h>
++
++#include "nettle-meta.h"
++
++#include "gost28147.h"
++
++const struct nettle_cipher nettle_gost28147 =
++  { "gost28147", sizeof(struct gost28147_ctx),
++    GOST28147_BLOCK_SIZE, GOST28147_KEY_SIZE,
++    (nettle_set_key_func *) gost28147_set_key,
++    (nettle_set_key_func *) gost28147_set_key,
++    (nettle_cipher_func *) gost28147_encrypt,
++    (nettle_cipher_func *) gost28147_decrypt
++  };
+diff --git a/gost28147.c b/gost28147.c
+index 1be5c231..9fe31043 100644
+--- a/gost28147.c
++++ b/gost28147.c
+@@ -32,6 +32,8 @@
+ #include "config.h"
+ #endif
+ 
++#include <assert.h>
++
+ #include "macros.h"
+ #include "gost28147.h"
+ #include "gost28147-internal.h"
+@@ -2217,3 +2219,86 @@ void _gost28147_encrypt_block (const uint32_t *key, const uint32_t sbox[4][256],
+   GOST_ENCRYPT_ROUND(l, r, key[1], key[0], sbox);
+   *out = l, *(out + 1) = r;
+ }
++
++void _gost28147_decrypt_block (const uint32_t *key, const uint32_t sbox[4][256],
++			       const uint32_t *in, uint32_t *out)
++{
++  uint32_t l, r;
++
++  r = in[0], l = in[1];
++  GOST_ENCRYPT_ROUND(l, r, key[0], key[1], sbox);
++  GOST_ENCRYPT_ROUND(l, r, key[2], key[3], sbox);
++  GOST_ENCRYPT_ROUND(l, r, key[4], key[5], sbox);
++  GOST_ENCRYPT_ROUND(l, r, key[6], key[7], sbox);
++  GOST_ENCRYPT_ROUND(l, r, key[7], key[6], sbox);
++  GOST_ENCRYPT_ROUND(l, r, key[5], key[4], sbox);
++  GOST_ENCRYPT_ROUND(l, r, key[3], key[2], sbox);
++  GOST_ENCRYPT_ROUND(l, r, key[1], key[0], sbox);
++  GOST_ENCRYPT_ROUND(l, r, key[7], key[6], sbox);
++  GOST_ENCRYPT_ROUND(l, r, key[5], key[4], sbox);
++  GOST_ENCRYPT_ROUND(l, r, key[3], key[2], sbox);
++  GOST_ENCRYPT_ROUND(l, r, key[1], key[0], sbox);
++  GOST_ENCRYPT_ROUND(l, r, key[7], key[6], sbox);
++  GOST_ENCRYPT_ROUND(l, r, key[5], key[4], sbox);
++  GOST_ENCRYPT_ROUND(l, r, key[3], key[2], sbox);
++  GOST_ENCRYPT_ROUND(l, r, key[1], key[0], sbox);
++  *out = l, *(out + 1) = r;
++}
++
++void
++gost28147_set_key(struct gost28147_ctx *ctx, const uint8_t *key)
++{
++  unsigned i;
++
++  assert(key);
++  for (i = 0; i < 8; i++, key += 4)
++    ctx->key[i] = LE_READ_UINT32(key);
++  gost28147_set_param(ctx, &gost28147_param_TC26_Z);
++}
++
++void
++gost28147_set_param(struct gost28147_ctx *ctx, const struct gost28147_param *param)
++{
++  assert(param);
++  ctx->sbox = param->sbox;
++}
++
++void
++gost28147_encrypt(const struct gost28147_ctx *ctx,
++		  size_t length, uint8_t *dst,
++		  const uint8_t *src)
++{
++  uint32_t block[2];
++
++  assert(!(length % GOST28147_BLOCK_SIZE));
++
++  while (length)
++    {
++      block[0] = LE_READ_UINT32(src); src += 4;
++      block[1] = LE_READ_UINT32(src); src += 4;
++      _gost28147_encrypt_block(ctx->key, ctx->sbox, block, block);
++      LE_WRITE_UINT32(dst, block[0]); dst += 4;
++      LE_WRITE_UINT32(dst, block[1]); dst += 4;
++      length -= GOST28147_BLOCK_SIZE;
++    }
++}
++
++void
++gost28147_decrypt(const struct gost28147_ctx *ctx,
++		  size_t length, uint8_t *dst,
++		  const uint8_t *src)
++{
++  uint32_t block[2];
++
++  assert(!(length % GOST28147_BLOCK_SIZE));
++
++  while (length)
++    {
++      block[0] = LE_READ_UINT32(src); src += 4;
++      block[1] = LE_READ_UINT32(src); src += 4;
++      _gost28147_decrypt_block(ctx->key, ctx->sbox, block, block);
++      LE_WRITE_UINT32(dst, block[0]); dst += 4;
++      LE_WRITE_UINT32(dst, block[1]); dst += 4;
++      length -= GOST28147_BLOCK_SIZE;
++    }
++}
+diff --git a/gost28147.h b/gost28147.h
+index f00b23f6..37633d9f 100644
+--- a/gost28147.h
++++ b/gost28147.h
+@@ -50,6 +50,20 @@ extern "C" {
+ #define gost28147_param_CryptoPro_D nettle_gost28147_param_CryptoPro_D
+ #define gost28147_param_TC26_Z nettle_gost28147_param_TC26_Z
+ 
++#define gost28147_set_key nettle_gost28147_set_key
++#define gost28147_set_param nettle_gost28147_set_param
++#define gost28147_encrypt nettle_gost28147_encrypt
++#define gost28147_decrypt nettle_gost28147_decrypt
++
++#define GOST28147_KEY_SIZE 32
++#define GOST28147_BLOCK_SIZE 8
++
++struct gost28147_ctx
++{
++  uint32_t key[GOST28147_KEY_SIZE/4];
++  const uint32_t (*sbox)[256];
++};
++
+ struct gost28147_param
+ {
+   uint32_t sbox[4][256];
+@@ -64,6 +78,22 @@ extern const struct gost28147_param gost28147_param_CryptoPro_C;
+ extern const struct gost28147_param gost28147_param_CryptoPro_D;
+ extern const struct gost28147_param gost28147_param_TC26_Z;
+ 
++void
++gost28147_set_key(struct gost28147_ctx *ctx, const uint8_t *key);
++
++void
++gost28147_set_param(struct gost28147_ctx *ctx,
++		    const struct gost28147_param *param);
++
++void
++gost28147_encrypt(const struct gost28147_ctx *ctx,
++		  size_t length, uint8_t *dst,
++		  const uint8_t *src);
++void
++gost28147_decrypt(const struct gost28147_ctx *ctx,
++		  size_t length, uint8_t *dst,
++		  const uint8_t *src);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/nettle-meta-ciphers.c b/nettle-meta-ciphers.c
+index 49cb47a7..3a48f2f4 100644
+--- a/nettle-meta-ciphers.c
++++ b/nettle-meta-ciphers.c
+@@ -54,6 +54,7 @@ const struct nettle_cipher * const _nettle_ciphers[] = {
+   &nettle_arctwo64,
+   &nettle_arctwo128,
+   &nettle_arctwo_gutmann128,
++  &nettle_gost28147,
+   NULL
+ };
+ 
+diff --git a/nettle-meta.h b/nettle-meta.h
+index b4cdb8f3..9075224a 100644
+--- a/nettle-meta.h
++++ b/nettle-meta.h
+@@ -89,6 +89,8 @@ extern const struct nettle_cipher nettle_arctwo64;
+ extern const struct nettle_cipher nettle_arctwo128;
+ extern const struct nettle_cipher nettle_arctwo_gutmann128;
+ 
++extern const struct nettle_cipher nettle_gost28147;
++
+ struct nettle_hash
+ {
+   const char *name;
+diff --git a/nettle.texinfo b/nettle.texinfo
+index 9a3ca04e..b77e2850 100644
+--- a/nettle.texinfo
++++ b/nettle.texinfo
+@@ -1793,6 +1793,44 @@ in any other way.
+ Analogous to @code{des_encrypt}
+ @end deftypefun
+ 
++@subsection GOST 28147-89 (Magma)
++GOST 28147-89 (also called Magma) is the Russian standard cipher. It uses a
++block size of 64 bits (8 octets), and a key size of 256 bits. Nettle defines
++GOST28147 in @file{<nettle/gost28147.h>}.
++
++@deftp {Context struct} {struct gost28147_ctx}
++@end deftp
++
++@defvr Constant GOST28147_BLOCK_SIZE
++The GOST28147 block-size, 8.
++@end defvr
++
++@defvr Constant GOST28147_KEY_SIZE
++GOST28147 key size, 32.
++@end defvr
++
++@deftypefun void gost28147_set_key (struct gost28147_ctx *@var{ctx}, const uint8_t *@var{key})
++Initialize the cipher. The same function is used for both encryption and
++decryption.
++@end deftypefun
++
++@deftypefun void gost28147_set_sbox (struct gost28147_ctx *@var{ctx}, const uint32_t *@var{sbox})
++Initialize the cipher S-BOX. The same function is used for both encryption and
++decryption.
++@end deftypefun
++
++@deftypefun void gost28147_encrypt (struct gost28147_ctx *@var{ctx}, size_t @var{length}, uint8_t *@var{dst}, const uint8_t *@var{src})
++Encryption function. @var{length} must be an integral multiple of the
++block size. If it is more than one block, the data is processed in ECB
++mode. @code{src} and @code{dst} may be equal, but they must not overlap
++in any other way.
++@end deftypefun
++
++@deftypefun void gost28147_decrypt (struct gost28147_ctx *@var{ctx}, size_t @var{length}, uint8_t *@var{dst}, const uint8_t *@var{src})
++Analogous to @code{gost28147_encrypt}
++@end deftypefun
++
++
+ @subsection Salsa20
+ @cindex Salsa20
+ Salsa20 is a fairly recent stream cipher designed by D. J. Bernstein. It
+diff --git a/testsuite/.gitignore b/testsuite/.gitignore
+index 066bcee2..ef234e34 100644
+--- a/testsuite/.gitignore
++++ b/testsuite/.gitignore
+@@ -42,6 +42,7 @@
+ /eddsa-sign-test
+ /eddsa-verify-test
+ /gcm-test
++/gost28147-test
+ /gosthash94-test
+ /hkdf-test
+ /hmac-test
+diff --git a/testsuite/.test-rules.make b/testsuite/.test-rules.make
+index efb7df3c..3e9bfd18 100644
+--- a/testsuite/.test-rules.make
++++ b/testsuite/.test-rules.make
+@@ -34,6 +34,9 @@ des-test$(EXEEXT): des-test.$(OBJEXT)
+ des3-test$(EXEEXT): des3-test.$(OBJEXT)
+ 	$(LINK) des3-test.$(OBJEXT) $(TEST_OBJS) -o des3-test$(EXEEXT)
+ 
++gost28147-test$(EXEEXT): gost28147-test.$(OBJEXT)
++	$(LINK) gost28147-test.$(OBJEXT) $(TEST_OBJS) -o gost28147-test$(EXEEXT)
++
+ md2-test$(EXEEXT): md2-test.$(OBJEXT)
+ 	$(LINK) md2-test.$(OBJEXT) $(TEST_OBJS) -o md2-test$(EXEEXT)
+ 
+diff --git a/testsuite/Makefile.in b/testsuite/Makefile.in
+index f8f85701..043b778a 100644
+--- a/testsuite/Makefile.in
++++ b/testsuite/Makefile.in
+@@ -16,6 +16,7 @@ TS_NETTLE_SOURCES = aes-test.c arcfour-test.c arctwo-test.c \
+ 		    camellia-test.c chacha-test.c \
+ 		    cnd-memcpy-test.c \
+ 		    des-test.c des3-test.c \
++		    gost28147-test.c \
+ 		    md2-test.c md4-test.c md5-test.c md5-compat-test.c \
+ 		    memeql-test.c memxor-test.c gosthash94-test.c \
+ 		    ripemd160-test.c hkdf-test.c \
+diff --git a/testsuite/gost28147-test.c b/testsuite/gost28147-test.c
+new file mode 100644
+index 00000000..3f8046e1
+--- /dev/null
++++ b/testsuite/gost28147-test.c
+@@ -0,0 +1,119 @@
++#include "testutils.h"
++#include "gost28147.h"
++
++static void
++test_gost28147(const struct gost28147_param *param,
++	       const struct tstring *key,
++	       const struct tstring *cleartext,
++	       const struct tstring *ciphertext)
++{
++  struct gost28147_ctx ctx;
++  uint8_t *data = xalloc(cleartext->length);
++  size_t length;
++
++  ASSERT (cleartext->length == ciphertext->length);
++  length = cleartext->length;
++
++  gost28147_set_key(&ctx, key->data);
++  gost28147_set_param(&ctx, param);
++  gost28147_encrypt(&ctx, length, data, cleartext->data);
++
++  if (!MEMEQ(length, data, ciphertext->data))
++    {
++      fprintf(stderr, "Encrypt failed:\nInput:");
++      tstring_print_hex(cleartext);
++      fprintf(stderr, "\nOutput: ");
++      print_hex(length, data);
++      fprintf(stderr, "\nExpected:");
++      tstring_print_hex(ciphertext);
++      fprintf(stderr, "\n");
++      FAIL();
++    }
++
++  gost28147_set_key(&ctx, key->data);
++  gost28147_set_param(&ctx, param);
++  gost28147_decrypt(&ctx, length, data, data);
++
++  if (!MEMEQ(length, data, cleartext->data))
++    {
++      fprintf(stderr, "Decrypt failed:\nInput:");
++      tstring_print_hex(ciphertext);
++      fprintf(stderr, "\nOutput: ");
++      print_hex(length, data);
++      fprintf(stderr, "\nExpected:");
++      tstring_print_hex(cleartext);
++      fprintf(stderr, "\n");
++      FAIL();
++    }
++
++  free(data);
++}
++
++void test_main(void)
++{
++  /* Examples from GOST R 34.11-94 standard */
++  test_gost28147(&gost28147_param_test_3411,
++      SHEX("546D2033 68656C32 69736520 73736E62 20616779 69677474 73656865 202C3D73"),
++      SHEX("00000000 00000000"),
++      SHEX("1B0BBC32 CEBCAB42"));
++
++  test_gost28147(&gost28147_param_test_3411,
++      SHEX("2033394D 6C320D09 65201A16 6E62001D 67794106 74740E13 6865160D 3D730C11"),
++      SHEX("00000000 00000000"),
++      SHEX("FDCF9B5D C8EB0352"));
++
++  test_gost28147(&gost28147_param_test_3411,
++      SHEX("39B213F5 F209A13F 1AE9BA3A FF1D0C62 41F9E1C7 F1130085 16F20D73 F311B180"),
++      SHEX("00000000 00000000"),
++      SHEX("280EFF00 9958348D"));
++
++  test_gost28147(&gost28147_param_test_3411,
++      SHEX("EC0A8BA1 5EC004A8 BAC50CAC 0C621DEE E1C7B8E7 007AE2EC F2731BFF 4E80E2A0 "),
++      SHEX("00000000 00000000"),
++      SHEX("2D562A0D 190486E7 "));
++
++  test_gost28147(&gost28147_param_test_3411,
++      SHEX("8182838485868788 898a8b8c8d8e8f80 d1d2d3d4d5d6d7d8 d9dadbdcdddedfd0"),
++      SHEX("0102030405060708 f1f2f3f4f5f6f7f8"),
++      SHEX("ced52a7ff7f260d5 bc81a80bb5e65976"));
++
++  test_gost28147(&gost28147_param_CryptoPro_3411,
++      SHEX("8182838485868788 898a8b8c8d8e8f80 d1d2d3d4d5d6d7d8 d9dadbdcdddedfd0"),
++      SHEX("0102030405060708 f1f2f3f4f5f6f7f8"),
++      SHEX("e42175e16922d0a8 48e59157d7106518"));
++
++  test_gost28147(&gost28147_param_Test_89,
++      SHEX("8182838485868788 898a8b8c8d8e8f80 d1d2d3d4d5d6d7d8 d9dadbdcdddedfd0"),
++      SHEX("0102030405060708 f1f2f3f4f5f6f7f8"),
++      SHEX("9856cf8bfcc282f4 3f465801c6539a5c"));
++
++  test_gost28147(&gost28147_param_CryptoPro_A,
++      SHEX("8182838485868788 898a8b8c8d8e8f80 d1d2d3d4d5d6d7d8 d9dadbdcdddedfd0"),
++      SHEX("0102030405060708 f1f2f3f4f5f6f7f8"),
++      SHEX("668184aedc48c917 4164347058845cac"));
++
++  test_gost28147(&gost28147_param_CryptoPro_B,
++      SHEX("8182838485868788 898a8b8c8d8e8f80 d1d2d3d4d5d6d7d8 d9dadbdcdddedfd0"),
++      SHEX("0102030405060708 f1f2f3f4f5f6f7f8"),
++      SHEX("dbee81147b74b0f2 db5ef00eff4bd528"));
++
++  test_gost28147(&gost28147_param_CryptoPro_C,
++      SHEX("8182838485868788 898a8b8c8d8e8f80 d1d2d3d4d5d6d7d8 d9dadbdcdddedfd0"),
++      SHEX("0102030405060708 f1f2f3f4f5f6f7f8"),
++      SHEX("31a3859d0aeeb80e 4afbd6ce7798ffa9"));
++
++  test_gost28147(&gost28147_param_CryptoPro_D,
++      SHEX("8182838485868788 898a8b8c8d8e8f80 d1d2d3d4d5d6d7d8 d9dadbdcdddedfd0"),
++      SHEX("0102030405060708 f1f2f3f4f5f6f7f8"),
++      SHEX("b1323e0b2173cbd1 c5282f2461e97aa8"));
++
++  test_gost28147(&gost28147_param_TC26_Z,
++      SHEX("8182838485868788 898a8b8c8d8e8f80 d1d2d3d4d5d6d7d8 d9dadbdcdddedfd0"),
++      SHEX("0102030405060708 f1f2f3f4f5f6f7f8"),
++      SHEX("ce5a5ed7e0577a5f d0cc85ce31635b8b"));
++
++  test_gost28147(&gost28147_param_TC26_Z,
++      SHEX("ccddeeff8899aabb4455667700112233f3f2f1f0f7f6f5f4fbfaf9f8fffefdfc"),
++      SHEX("1032547698badcfe"),
++      SHEX("3dcad8c2e501e94e"));
++}
+diff --git a/testsuite/meta-cipher-test.c b/testsuite/meta-cipher-test.c
+index f949fd76..8c435cb5 100644
+--- a/testsuite/meta-cipher-test.c
++++ b/testsuite/meta-cipher-test.c
+@@ -13,6 +13,7 @@ const char* ciphers[] = {
+   "camellia192",
+   "camellia256",
+   "cast128",
++  "gost28147",
+   "serpent128",
+   "serpent192",
+   "serpent256",
+-- 
+2.49.0
+
