@@ -1,0 +1,900 @@
+From 2a3f98c9f29579dca1ad69386b18121995e7b9b3 Mon Sep 17 00:00:00 2001
+From: Dmitry Eremin-Solenikov <dbaryshkov@gmail.com>
+Date: Mon, 30 Oct 2017 13:22:01 +0300
+Subject: [PATCH] kuznyechik: implement 128-bit algorithm from GOST R
+ 34.12-2015
+
+Implement 128-bit algorithm (Kuznyechik) from GOST R 34.12-2015.
+
+Signed-off-by: Dmitry Eremin-Solenikov <dbaryshkov@gmail.com>
+---
+ .gitignore                   |   2 +
+ Makefile.in                  |  21 ++-
+ examples/nettle-benchmark.c  |   2 +-
+ kuzdata.c                    | 228 +++++++++++++++++++++++++++++++++
+ kuznyechik-meta.c            |  49 +++++++
+ kuznyechik.c                 | 241 +++++++++++++++++++++++++++++++++++
+ kuznyechik.h                 |  74 +++++++++++
+ nettle-meta-ciphers.c        |   1 +
+ nettle-meta.h                |   1 +
+ testsuite/.gitignore         |   1 +
+ testsuite/.test-rules.make   |   3 +
+ testsuite/Makefile.in        |   2 +-
+ testsuite/kuznyechik-test.c  |  74 +++++++++++
+ testsuite/meta-cipher-test.c |   1 +
+ 14 files changed, 697 insertions(+), 3 deletions(-)
+ create mode 100644 kuzdata.c
+ create mode 100644 kuznyechik-meta.c
+ create mode 100644 kuznyechik.c
+ create mode 100644 kuznyechik.h
+ create mode 100644 testsuite/kuznyechik-test.c
+
+diff --git a/.gitignore b/.gitignore
+index 7a9c1eaa..aad8430e 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -40,6 +40,8 @@ core
+ /gcmdata
+ /shadata
+ /twofishdata
++/kuzdata
++/kuztable.h
+ /keymap.h
+ /parity.h
+ /rotors.h
+diff --git a/Makefile.in b/Makefile.in
+index 2323969b..d1ba708a 100644
+--- a/Makefile.in
++++ b/Makefile.in
+@@ -109,6 +109,7 @@ nettle_SOURCES = aes-decrypt-internal.c aes-decrypt.c \
+ 		 hmac-sha1.c hmac-sha224.c hmac-sha256.c hmac-sha384.c \
+ 		 hmac-sha512.c hmac-streebog.c \
+ 		 knuth-lfib.c hkdf.c \
++		 kuznyechik.c kuznyechik-meta.c \
+ 		 magma.c magma-meta.c \
+ 		 md2.c md2-meta.c md4.c md4-meta.c \
+ 		 md5.c md5-compress.c md5-compat.c md5-meta.c \
+@@ -207,6 +208,7 @@ HEADERS = aes.h arcfour.h arctwo.h asn1.h blowfish.h \
+ 	  ecc-curve.h ecc.h ecdsa.h eddsa.h \
+ 	  gcm.h gost28147.h gostdsa.h gosthash94.h hmac.h \
+ 	  knuth-lfib.h hkdf.h \
++	  kuznyechik.h \
+ 	  macros.h \
+ 	  cmac.h siv-cmac.h \
+ 	  magma.h md2.h md4.h \
+@@ -224,7 +226,8 @@ INSTALL_HEADERS = $(HEADERS) version.h @IF_MINI_GMP@ mini-gmp.h
+ SOURCES = $(nettle_SOURCES) $(hogweed_SOURCES) \
+ 	  $(getopt_SOURCES) $(internal_SOURCES) \
+ 	  $(OPT_SOURCES) \
+-	  aesdata.c desdata.c twofishdata.c shadata.c gcmdata.c eccdata.c
++	  aesdata.c desdata.c twofishdata.c shadata.c gcmdata.c eccdata.c \
++	  kuzdata.c
+ 
+ # NOTE: This list must include all source files, with no duplicates,
+ # independently of which source files are included in the build.
+@@ -239,8 +242,11 @@ DISTFILES = $(SOURCES) $(HEADERS) getopt.h getopt_int.h \
+ 	INSTALL NEWS ChangeLog \
+ 	nettle.pc.in hogweed.pc.in \
+ 	$(des_headers) descore.README desdata.stamp \
++	kuztable.h kuzdata.stamp \
+ 	aes-internal.h block-internal.h camellia-internal.h \
+ 	gost28147-internal.h serpent-internal.h \
++	aes-internal.h block-internal.h \
++	camellia-internal.h serpent-internal.h \
+ 	cast128_sboxes.h desinfo.h desCode.h \
+ 	ripemd160-internal.h sha2-internal.h \
+ 	memxor-internal.h nettle-internal.h nettle-write.h \
+@@ -328,6 +334,10 @@ eccparams$(EXEEXT_FOR_BUILD): eccparams.c
+ 	$(CC_FOR_BUILD) `test -f eccparams.c || echo '$(srcdir)/'`eccparams.c \
+ 	-o eccparams$(EXEEXT_FOR_BUILD)
+ 
++kuzdata$(EXEEXT_FOR_BUILD): kuzdata.c
++	$(CC_FOR_BUILD) `test -f kuzdata.c || echo '$(srcdir)/'`kuzdata.c \
++	-o kuzdata$(EXEEXT_FOR_BUILD)
++
+ # desCore rules
+ # It seems using $(srcdir)/ doesn't work with GNU make 3.79.1
+ # des_headers = $(srcdir)/rotors.h $(srcdir)/keymap.h 
+@@ -345,6 +355,15 @@ desdata.stamp: desdata.c
+ 
+ des.$(OBJEXT): des.c des.h $(des_headers)
+ 
++kuztable.h: kuzdata.stamp
++	./kuzdata$(EXEEXT_FOR_BUILD) > $@T && mv $@T $@
++
++kuzdata.stamp: kuzdata.c
++	$(MAKE) kuzdata$(EXEEXT_FOR_BUILD)
++	echo stamp > kuzdata.stamp
++
++kuznyechik.o: kuztable.h
++
+ # Generate ECC files, with roughly 16 KB of tables per curve.
+ 
+ # Some reasonable choices for 192:
+diff --git a/examples/nettle-benchmark.c b/examples/nettle-benchmark.c
+index 4438465c..fa377992 100644
+--- a/examples/nettle-benchmark.c
++++ b/examples/nettle-benchmark.c
+@@ -936,7 +936,7 @@ main(int argc, char **argv)
+       &nettle_des3,
+       &nettle_serpent256,
+       &nettle_twofish128, &nettle_twofish192, &nettle_twofish256,
+-      &nettle_magma,
++      &nettle_magma, &nettle_kuznyechik,
+       NULL
+     };
+ 
+diff --git a/kuzdata.c b/kuzdata.c
+new file mode 100644
+index 00000000..1aa01ed0
+--- /dev/null
++++ b/kuzdata.c
+@@ -0,0 +1,228 @@
++/*
++   Copyright: 2017 Dmitry Eremin-Solenikov <dbaryshkov@gmail.com>
++
++   This file is part of GNU Nettle.
++
++   GNU Nettle is free software: you can redistribute it and/or
++   modify it under the terms of either:
++
++     * the GNU Lesser General Public License as published by the Free
++       Software Foundation; either version 3 of the License, or (at your
++       option) any later version.
++
++   or
++
++     * the GNU General Public License as published by the Free
++       Software Foundation; either version 2 of the License, or (at your
++       option) any later version.
++
++   or both in parallel, as here.
++
++   GNU Nettle is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   General Public License for more details.
++
++   You should have received copies of the GNU General Public License and
++   the GNU Lesser General Public License along with this program.  If
++   not, see http://www.gnu.org/licenses/.
++ */
++
++#include <stdio.h>
++#include <stdint.h>
++#include <inttypes.h>
++#include <string.h>
++
++#include "macros.h"
++
++static uint8_t pi[256] =
++{
++  0xfc, 0xee, 0xdd, 0x11, 0xcf, 0x6e, 0x31, 0x16,
++  0xfb, 0xc4, 0xfa, 0xda, 0x23, 0xc5, 0x04, 0x4d,
++  0xe9, 0x77, 0xf0, 0xdb, 0x93, 0x2e, 0x99, 0xba,
++  0x17, 0x36, 0xf1, 0xbb, 0x14, 0xcd, 0x5f, 0xc1,
++  0xf9, 0x18, 0x65, 0x5a, 0xe2, 0x5c, 0xef, 0x21,
++  0x81, 0x1c, 0x3c, 0x42, 0x8b, 0x01, 0x8e, 0x4f,
++  0x05, 0x84, 0x02, 0xae, 0xe3, 0x6a, 0x8f, 0xa0,
++  0x06, 0x0b, 0xed, 0x98, 0x7f, 0xd4, 0xd3, 0x1f,
++  0xeb, 0x34, 0x2c, 0x51, 0xea, 0xc8, 0x48, 0xab,
++  0xf2, 0x2a, 0x68, 0xa2, 0xfd, 0x3a, 0xce, 0xcc,
++  0xb5, 0x70, 0x0e, 0x56, 0x08, 0x0c, 0x76, 0x12,
++  0xbf, 0x72, 0x13, 0x47, 0x9c, 0xb7, 0x5d, 0x87,
++  0x15, 0xa1, 0x96, 0x29, 0x10, 0x7b, 0x9a, 0xc7,
++  0xf3, 0x91, 0x78, 0x6f, 0x9d, 0x9e, 0xb2, 0xb1,
++  0x32, 0x75, 0x19, 0x3d, 0xff, 0x35, 0x8a, 0x7e,
++  0x6d, 0x54, 0xc6, 0x80, 0xc3, 0xbd, 0x0d, 0x57,
++  0xdf, 0xf5, 0x24, 0xa9, 0x3e, 0xa8, 0x43, 0xc9,
++  0xd7, 0x79, 0xd6, 0xf6, 0x7c, 0x22, 0xb9, 0x03,
++  0xe0, 0x0f, 0xec, 0xde, 0x7a, 0x94, 0xb0, 0xbc,
++  0xdc, 0xe8, 0x28, 0x50, 0x4e, 0x33, 0x0a, 0x4a,
++  0xa7, 0x97, 0x60, 0x73, 0x1e, 0x00, 0x62, 0x44,
++  0x1a, 0xb8, 0x38, 0x82, 0x64, 0x9f, 0x26, 0x41,
++  0xad, 0x45, 0x46, 0x92, 0x27, 0x5e, 0x55, 0x2f,
++  0x8c, 0xa3, 0xa5, 0x7d, 0x69, 0xd5, 0x95, 0x3b,
++  0x07, 0x58, 0xb3, 0x40, 0x86, 0xac, 0x1d, 0xf7,
++  0x30, 0x37, 0x6b, 0xe4, 0x88, 0xd9, 0xe7, 0x89,
++  0xe1, 0x1b, 0x83, 0x49, 0x4c, 0x3f, 0xf8, 0xfe,
++  0x8d, 0x53, 0xaa, 0x90, 0xca, 0xd8, 0x85, 0x61,
++  0x20, 0x71, 0x67, 0xa4, 0x2d, 0x2b, 0x09, 0x5b,
++  0xcb, 0x9b, 0x25, 0xd0, 0xbe, 0xe5, 0x6c, 0x52,
++  0x59, 0xa6, 0x74, 0xd2, 0xe6, 0xf4, 0xb4, 0xc0,
++  0xd1, 0x66, 0xaf, 0xc2, 0x39, 0x4b, 0x63, 0xb6,
++};
++
++static uint8_t MGF2(uint16_t a, uint8_t b)
++{
++  uint16_t s = 0;
++  uint16_t m;
++  uint16_t p;
++
++  for (m = 1; m != 0x100; m <<= 1, a <<= 1)
++    {
++      if (b & m)
++	{
++	  s ^= a;
++	}
++    }
++
++  for (m = 0x8000, p = 0xc3 << 7; m >= 256; m >>= 1, p >>= 1)
++    {
++      if (s & m)
++	{
++	  s &= ~m;
++	  s ^= p;
++	}
++    }
++  return s;
++}
++
++static uint8_t larr[16] =
++{
++  1, 148, 32, 133, 16,
++  194, 192, 1, 251, 1, 192,
++  194, 16, 133, 32, 148,
++};
++
++static void Linv(uint8_t *a)
++{
++  uint8_t i;
++
++  for (i = 0; i < 16; i++)
++    {
++      uint8_t c = 0;
++      unsigned j;
++
++      for (j = 0; j < 16; j++)
++	c ^= MGF2(larr[j], a[(i + j) % 16]);
++      a[i] = c;
++    }
++}
++
++static void L(uint8_t *a)
++{
++  uint8_t i;
++
++  for (i = 15; i < 16; i--) { /* 16 iterations from 15 to 0 */
++      uint8_t c = 0;
++      unsigned j;
++
++      for (j = 0; j < 16; j++)
++	c ^= MGF2(larr[j], a[(i + j) % 16]);
++      a[i] = c;
++  }
++}
++
++
++int main(void)
++{
++  unsigned i, j, k;
++  uint8_t pi_inv[256];
++
++  printf("static const uint8_t pi[256] =\n{\n  ");
++  for (i = 0; i < 256; i++)
++    {
++      printf("0x%02hhx,%s", pi[i], (i + 1) % 8 ? " " : i == 255 ? "\n" : "\n  ");
++    }
++  printf("};\n\n");
++  for (i = 0; i < 256; i++)
++    {
++      pi_inv[pi[i]] = i;
++    }
++  printf("static const uint8_t pi_inv[256] =\n{\n  ");
++  for (i = 0; i < 256; i++)
++    {
++      printf("0x%02hhx,%s", pi_inv[i], (i + 1) % 8 ? " " : i == 255 ? "\n" : "\n  ");
++    }
++  printf("};\n\n");
++  printf("static const uint8_t kuz_key_table[32][16] =\n{\n");
++  for (i = 0; i < 32; i++)
++    {
++      uint8_t a[16] = {};
++      a[15] = i + 1;
++      L(a);
++      printf("  {");
++      for (j = 0; j < 16; j++)
++	printf(" 0x%02hhx,", a[j]);
++      printf("},\n");
++#if 0
++      printf("\t{ 0x%016" PRIx64 "ULL, 0x%016" PRIx64 "ULL, },\n", READ_UINT64(a), READ_UINT64(a+8));
++#endif
++    }
++  printf("};\n\n");
++  printf("static const uint8_t kuz_table[16][256 * 16] =\n{\n");
++  for (i = 0; i < 16; i++)
++    {
++      printf("  { /* %d */\n", i);
++      for (j = 0; j < 256; j++)
++	{
++	  uint8_t a[16] = {};
++
++	  a[i] = pi[j];
++	  L(a);
++	  printf("   ");
++	  for (k = 0; k < 16; k++)
++	    printf(" 0x%02hhx,", a[k]);
++	  printf("\n");
++	}
++      printf("  },\n");
++    }
++  printf("};\n\n");
++  printf("static const uint8_t kuz_table_inv[16][256 * 16] =\n{\n");
++  for (i = 0; i < 16; i++)
++    {
++      printf("  { /* %d */\n", i);
++      for (j = 0; j < 256; j++)
++	{
++	  uint8_t a[16] = {};
++
++	  a[i] = j;
++	  Linv(a);
++	  printf("   ");
++	  for (k = 0; k < 16; k++)
++	    printf(" 0x%02hhx,", a[k]);
++	  printf("\n");
++	}
++      printf("  },\n");
++    }
++  printf("};\n\n");
++  printf("static const uint8_t kuz_table_inv_LS[16][256 * 16] =\n{\n");
++  for (i = 0; i < 16; i++)
++    {
++      printf("  { /* %d */\n", i);
++      for (j = 0; j < 256; j++)
++	{
++	  uint8_t a[16] = {};
++
++	  a[i] = pi_inv[j];
++	  Linv(a);
++	  printf("   ");
++	  for (k = 0; k < 16; k++)
++	    printf(" 0x%02hhx,", a[k]);
++	  printf("\n");
++	}
++      printf("  },\n");
++    }
++  printf("};\n");
++
++  return 0;
++}
+diff --git a/kuznyechik-meta.c b/kuznyechik-meta.c
+new file mode 100644
+index 00000000..cda23c48
+--- /dev/null
++++ b/kuznyechik-meta.c
+@@ -0,0 +1,49 @@
++/* kuznyechik-meta.c
++
++   Copyright (C) 2017 Dmitry Eremin-Solenikov
++
++   This file is part of GNU Nettle.
++
++   GNU Nettle is free software: you can redistribute it and/or
++   modify it under the terms of either:
++
++     * the GNU Lesser General Public License as published by the Free
++       Software Foundation; either version 3 of the License, or (at your
++       option) any later version.
++
++   or
++
++     * the GNU General Public License as published by the Free
++       Software Foundation; either version 2 of the License, or (at your
++       option) any later version.
++
++   or both in parallel, as here.
++
++   GNU Nettle is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   General Public License for more details.
++
++   You should have received copies of the GNU General Public License and
++   the GNU Lesser General Public License along with this program.  If
++   not, see http://www.gnu.org/licenses/.
++*/
++
++#if HAVE_CONFIG_H
++# include "config.h"
++#endif
++
++#include <assert.h>
++
++#include "nettle-meta.h"
++
++#include "kuznyechik.h"
++
++const struct nettle_cipher nettle_kuznyechik =
++  { "kuznyechik", sizeof(struct kuznyechik_ctx),
++    KUZNYECHIK_BLOCK_SIZE, KUZNYECHIK_KEY_SIZE,
++    (nettle_set_key_func *) kuznyechik_set_key,
++    (nettle_set_key_func *) kuznyechik_set_key,
++    (nettle_cipher_func *) kuznyechik_encrypt,
++    (nettle_cipher_func *) kuznyechik_decrypt
++  };
+diff --git a/kuznyechik.c b/kuznyechik.c
+new file mode 100644
+index 00000000..e1d9bedf
+--- /dev/null
++++ b/kuznyechik.c
+@@ -0,0 +1,241 @@
++/* kuznyechik.c - GOST R 34.12-2015 (Kuznyechik) cipher implementation
++
++   Copyright: 2017 Dmitry Eremin-Solenikov <dbaryshkov@gmail.com>
++
++   This file is part of GNU Nettle.
++
++   GNU Nettle is free software: you can redistribute it and/or
++   modify it under the terms of either:
++
++     * the GNU Lesser General Public License as published by the Free
++       Software Foundation; either version 3 of the License, or (at your
++       option) any later version.
++
++   or
++
++     * the GNU General Public License as published by the Free
++       Software Foundation; either version 2 of the License, or (at your
++       option) any later version.
++
++   or both in parallel, as here.
++
++   GNU Nettle is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   General Public License for more details.
++
++   You should have received copies of the GNU General Public License and
++   the GNU Lesser General Public License along with this program.  If
++   not, see http://www.gnu.org/licenses/.
++ */
++
++#if HAVE_CONFIG_H
++#include "config.h"
++#endif
++
++#include <assert.h>
++#include <string.h>
++
++#include "macros.h"
++#include "memxor.h"
++#include "nettle-write.h"
++#include "kuznyechik.h"
++
++#include "kuztable.h"
++
++static void S(uint8_t *a, const uint8_t *b)
++{
++  a[0] = pi[b[0]];
++  a[1] = pi[b[1]];
++  a[2] = pi[b[2]];
++  a[3] = pi[b[3]];
++  a[4] = pi[b[4]];
++  a[5] = pi[b[5]];
++  a[6] = pi[b[6]];
++  a[7] = pi[b[7]];
++  a[8] = pi[b[8]];
++  a[9] = pi[b[9]];
++  a[10] = pi[b[10]];
++  a[11] = pi[b[11]];
++  a[12] = pi[b[12]];
++  a[13] = pi[b[13]];
++  a[14] = pi[b[14]];
++  a[15] = pi[b[15]];
++}
++
++static void Sinv(uint8_t *a, const uint8_t *b)
++{
++  a[0] = pi_inv[b[0]];
++  a[1] = pi_inv[b[1]];
++  a[2] = pi_inv[b[2]];
++  a[3] = pi_inv[b[3]];
++  a[4] = pi_inv[b[4]];
++  a[5] = pi_inv[b[5]];
++  a[6] = pi_inv[b[6]];
++  a[7] = pi_inv[b[7]];
++  a[8] = pi_inv[b[8]];
++  a[9] = pi_inv[b[9]];
++  a[10] = pi_inv[b[10]];
++  a[11] = pi_inv[b[11]];
++  a[12] = pi_inv[b[12]];
++  a[13] = pi_inv[b[13]];
++  a[14] = pi_inv[b[14]];
++  a[15] = pi_inv[b[15]];
++}
++
++static void Linv(uint8_t *a, const uint8_t *b)
++{
++  memcpy(a, &kuz_table_inv[0][b[0] * 16], KUZNYECHIK_BLOCK_SIZE);
++  memxor(a, &kuz_table_inv[1][b[1] * 16], KUZNYECHIK_BLOCK_SIZE);
++  memxor(a, &kuz_table_inv[2][b[2] * 16], KUZNYECHIK_BLOCK_SIZE);
++  memxor(a, &kuz_table_inv[3][b[3] * 16], KUZNYECHIK_BLOCK_SIZE);
++  memxor(a, &kuz_table_inv[4][b[4] * 16], KUZNYECHIK_BLOCK_SIZE);
++  memxor(a, &kuz_table_inv[5][b[5] * 16], KUZNYECHIK_BLOCK_SIZE);
++  memxor(a, &kuz_table_inv[6][b[6] * 16], KUZNYECHIK_BLOCK_SIZE);
++  memxor(a, &kuz_table_inv[7][b[7] * 16], KUZNYECHIK_BLOCK_SIZE);
++  memxor(a, &kuz_table_inv[8][b[8] * 16], KUZNYECHIK_BLOCK_SIZE);
++  memxor(a, &kuz_table_inv[9][b[9] * 16], KUZNYECHIK_BLOCK_SIZE);
++  memxor(a, &kuz_table_inv[10][b[10] * 16], KUZNYECHIK_BLOCK_SIZE);
++  memxor(a, &kuz_table_inv[11][b[11] * 16], KUZNYECHIK_BLOCK_SIZE);
++  memxor(a, &kuz_table_inv[12][b[12] * 16], KUZNYECHIK_BLOCK_SIZE);
++  memxor(a, &kuz_table_inv[13][b[13] * 16], KUZNYECHIK_BLOCK_SIZE);
++  memxor(a, &kuz_table_inv[14][b[14] * 16], KUZNYECHIK_BLOCK_SIZE);
++  memxor(a, &kuz_table_inv[15][b[15] * 16], KUZNYECHIK_BLOCK_SIZE);
++}
++
++static void LSX(uint8_t *a, const uint8_t *b, const uint8_t *c)
++{
++  uint8_t t[16];
++
++  memcpy(t, &kuz_table[0][(b[0] ^ c[0]) * 16], KUZNYECHIK_BLOCK_SIZE);
++  memxor(t, &kuz_table[1][(b[1] ^ c[1]) * 16], KUZNYECHIK_BLOCK_SIZE);
++  memxor(t, &kuz_table[2][(b[2] ^ c[2]) * 16], KUZNYECHIK_BLOCK_SIZE);
++  memxor(t, &kuz_table[3][(b[3] ^ c[3]) * 16], KUZNYECHIK_BLOCK_SIZE);
++  memxor(t, &kuz_table[4][(b[4] ^ c[4]) * 16], KUZNYECHIK_BLOCK_SIZE);
++  memxor(t, &kuz_table[5][(b[5] ^ c[5]) * 16], KUZNYECHIK_BLOCK_SIZE);
++  memxor(t, &kuz_table[6][(b[6] ^ c[6]) * 16], KUZNYECHIK_BLOCK_SIZE);
++  memxor(t, &kuz_table[7][(b[7] ^ c[7]) * 16], KUZNYECHIK_BLOCK_SIZE);
++  memxor(t, &kuz_table[8][(b[8] ^ c[8]) * 16], KUZNYECHIK_BLOCK_SIZE);
++  memxor(t, &kuz_table[9][(b[9] ^ c[9]) * 16], KUZNYECHIK_BLOCK_SIZE);
++  memxor(t, &kuz_table[10][(b[10] ^ c[10]) * 16], KUZNYECHIK_BLOCK_SIZE);
++  memxor(t, &kuz_table[11][(b[11] ^ c[11]) * 16], KUZNYECHIK_BLOCK_SIZE);
++  memxor(t, &kuz_table[12][(b[12] ^ c[12]) * 16], KUZNYECHIK_BLOCK_SIZE);
++  memxor(t, &kuz_table[13][(b[13] ^ c[13]) * 16], KUZNYECHIK_BLOCK_SIZE);
++  memxor(t, &kuz_table[14][(b[14] ^ c[14]) * 16], KUZNYECHIK_BLOCK_SIZE);
++  memxor3(a, t, &kuz_table[15][(b[15] ^ c[15]) * 16], KUZNYECHIK_BLOCK_SIZE);
++}
++
++static void XLiSi(uint8_t *a, const uint8_t *b, const uint8_t *c)
++{
++  uint8_t t[16];
++
++  memcpy(t, &kuz_table_inv_LS[0][b[0] * 16], KUZNYECHIK_BLOCK_SIZE);
++  memxor(t, &kuz_table_inv_LS[1][b[1] * 16], KUZNYECHIK_BLOCK_SIZE);
++  memxor(t, &kuz_table_inv_LS[2][b[2] * 16], KUZNYECHIK_BLOCK_SIZE);
++  memxor(t, &kuz_table_inv_LS[3][b[3] * 16], KUZNYECHIK_BLOCK_SIZE);
++  memxor(t, &kuz_table_inv_LS[4][b[4] * 16], KUZNYECHIK_BLOCK_SIZE);
++  memxor(t, &kuz_table_inv_LS[5][b[5] * 16], KUZNYECHIK_BLOCK_SIZE);
++  memxor(t, &kuz_table_inv_LS[6][b[6] * 16], KUZNYECHIK_BLOCK_SIZE);
++  memxor(t, &kuz_table_inv_LS[7][b[7] * 16], KUZNYECHIK_BLOCK_SIZE);
++  memxor(t, &kuz_table_inv_LS[8][b[8] * 16], KUZNYECHIK_BLOCK_SIZE);
++  memxor(t, &kuz_table_inv_LS[9][b[9] * 16], KUZNYECHIK_BLOCK_SIZE);
++  memxor(t, &kuz_table_inv_LS[10][b[10] * 16], KUZNYECHIK_BLOCK_SIZE);
++  memxor(t, &kuz_table_inv_LS[11][b[11] * 16], KUZNYECHIK_BLOCK_SIZE);
++  memxor(t, &kuz_table_inv_LS[12][b[12] * 16], KUZNYECHIK_BLOCK_SIZE);
++  memxor(t, &kuz_table_inv_LS[13][b[13] * 16], KUZNYECHIK_BLOCK_SIZE);
++  memxor(t, &kuz_table_inv_LS[14][b[14] * 16], KUZNYECHIK_BLOCK_SIZE);
++  memxor(t, &kuz_table_inv_LS[15][b[15] * 16], KUZNYECHIK_BLOCK_SIZE);
++  memxor3(a, t, c, 16);
++}
++
++static void subkey(uint8_t *out, const uint8_t *key, unsigned i)
++{
++  uint8_t test[16];
++
++  LSX(test, key+0, kuz_key_table[i + 0]);
++  memxor3(out+16, test, key + 16, 16);
++  LSX(test, out+16, kuz_key_table[i + 1]);
++  memxor3(out+0, test, key + 0, 16);
++  LSX(test, out+0, kuz_key_table[i + 2]);
++  memxor(out+16, test, 16);
++  LSX(test, out+16, kuz_key_table[i + 3]);
++  memxor(out+0, test, 16);
++  LSX(test, out+0, kuz_key_table[i + 4]);
++  memxor(out+16, test, 16);
++  LSX(test, out+16, kuz_key_table[i + 5]);
++  memxor(out+0, test, 16);
++  LSX(test, out+0, kuz_key_table[i + 6]);
++  memxor(out+16, test, 16);
++  LSX(test, out+16, kuz_key_table[i + 7]);
++  memxor(out+0, test, 16);
++}
++
++void
++kuznyechik_set_key(struct kuznyechik_ctx *ctx, const uint8_t *key)
++{
++  unsigned i;
++
++  memcpy(ctx->key, key, 32);
++  subkey(ctx->key + 32, ctx->key, 0);
++  subkey(ctx->key + 64, ctx->key + 32, 8);
++  subkey(ctx->key + 96, ctx->key + 64, 16);
++  subkey(ctx->key + 128, ctx->key + 96, 24);
++  for (i = 0; i < 10; i++)
++    Linv(ctx->dekey + 16 * i, ctx->key + 16 * i);
++}
++
++void
++kuznyechik_encrypt(const struct kuznyechik_ctx *ctx,
++	      size_t length, uint8_t *dst,
++	      const uint8_t *src)
++{
++  uint8_t temp[KUZNYECHIK_BLOCK_SIZE];
++
++  assert(!(length % KUZNYECHIK_BLOCK_SIZE));
++
++  while (length)
++    {
++      LSX(temp, ctx->key + 16 * 0, src);
++      LSX(temp, ctx->key + 16 * 1, temp);
++      LSX(temp, ctx->key + 16 * 2, temp);
++      LSX(temp, ctx->key + 16 * 3, temp);
++      LSX(temp, ctx->key + 16 * 4, temp);
++      LSX(temp, ctx->key + 16 * 5, temp);
++      LSX(temp, ctx->key + 16 * 6, temp);
++      LSX(temp, ctx->key + 16 * 7, temp);
++      LSX(temp, ctx->key + 16 * 8, temp);
++      memxor3(dst, ctx->key + 16 * 9, temp, 16);
++      src += KUZNYECHIK_BLOCK_SIZE;
++      dst+= KUZNYECHIK_BLOCK_SIZE;
++      length -= KUZNYECHIK_BLOCK_SIZE;
++    }
++}
++
++void
++kuznyechik_decrypt(const struct kuznyechik_ctx *ctx,
++	      size_t length, uint8_t *dst,
++	      const uint8_t *src)
++{
++  uint8_t temp[KUZNYECHIK_BLOCK_SIZE];
++
++  assert(!(length % KUZNYECHIK_BLOCK_SIZE));
++
++  while (length)
++    {
++      S(temp, src);
++      XLiSi(temp, temp, ctx->dekey + 16 * 9);
++      XLiSi(temp, temp, ctx->dekey + 16 * 8);
++      XLiSi(temp, temp, ctx->dekey + 16 * 7);
++      XLiSi(temp, temp, ctx->dekey + 16 * 6);
++      XLiSi(temp, temp, ctx->dekey + 16 * 5);
++      XLiSi(temp, temp, ctx->dekey + 16 * 4);
++      XLiSi(temp, temp, ctx->dekey + 16 * 3);
++      XLiSi(temp, temp, ctx->dekey + 16 * 2);
++      XLiSi(temp, temp, ctx->dekey + 16 * 1);
++      Sinv(dst, temp);
++      memxor(dst, ctx->key + 16 * 0, 16);
++      src += KUZNYECHIK_BLOCK_SIZE;
++      dst+= KUZNYECHIK_BLOCK_SIZE;
++      length -= KUZNYECHIK_BLOCK_SIZE;
++    }
++}
+diff --git a/kuznyechik.h b/kuznyechik.h
+new file mode 100644
+index 00000000..d292c51f
+--- /dev/null
++++ b/kuznyechik.h
+@@ -0,0 +1,74 @@
++/* kuznyechik.h
++
++   The GOST R 34.12-2015 (Kuznyechik) cipher function.
++
++   Copyright (C) 2017 Dmitry Eremin-Solenikov
++
++   This file is part of GNU Nettle.
++
++   GNU Nettle is free software: you can redistribute it and/or
++   modify it under the terms of either:
++
++     * the GNU Lesser General Public License as published by the Free
++       Software Foundation; either version 3 of the License, or (at your
++       option) any later version.
++
++   or
++
++     * the GNU General Public License as published by the Free
++       Software Foundation; either version 2 of the License, or (at your
++       option) any later version.
++
++   or both in parallel, as here.
++
++   GNU Nettle is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   General Public License for more details.
++
++   You should have received copies of the GNU General Public License and
++   the GNU Lesser General Public License along with this program.  If
++   not, see http://www.gnu.org/licenses/.
++*/
++
++#ifndef NETTLE_KUZNYECHIK_H_INCLUDED
++#define NETTLE_KUZNYECHIK_H_INCLUDED
++
++#include "nettle-types.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define kuznyechik_set_key nettle_kuznyechik_set_key
++#define kuznyechik_set_param nettle_kuznyechik_set_param
++#define kuznyechik_encrypt nettle_kuznyechik_encrypt
++#define kuznyechik_decrypt nettle_kuznyechik_decrypt
++
++#define KUZNYECHIK_KEY_SIZE 32
++#define KUZNYECHIK_SUBKEYS_SIZE (16 * 10)
++#define KUZNYECHIK_BLOCK_SIZE 16
++
++struct kuznyechik_ctx
++{
++  uint8_t key[KUZNYECHIK_SUBKEYS_SIZE];
++  uint8_t dekey[KUZNYECHIK_SUBKEYS_SIZE];
++};
++
++void
++kuznyechik_set_key(struct kuznyechik_ctx *ctx, const uint8_t *key);
++
++void
++kuznyechik_encrypt(const struct kuznyechik_ctx *ctx,
++		   size_t length, uint8_t *dst,
++		   const uint8_t *src);
++void
++kuznyechik_decrypt(const struct kuznyechik_ctx *ctx,
++		   size_t length, uint8_t *dst,
++		   const uint8_t *src);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* NETTLE_KUZNYECHIK_H_INCLUDED */
+diff --git a/nettle-meta-ciphers.c b/nettle-meta-ciphers.c
+index ff31bccf..258c5c72 100644
+--- a/nettle-meta-ciphers.c
++++ b/nettle-meta-ciphers.c
+@@ -56,6 +56,7 @@ const struct nettle_cipher * const _nettle_ciphers[] = {
+   &nettle_arctwo_gutmann128,
+   &nettle_gost28147,
+   &nettle_magma,
++  &nettle_kuznyechik,
+   NULL
+ };
+ 
+diff --git a/nettle-meta.h b/nettle-meta.h
+index bb7dda51..48af4810 100644
+--- a/nettle-meta.h
++++ b/nettle-meta.h
+@@ -91,6 +91,7 @@ extern const struct nettle_cipher nettle_arctwo_gutmann128;
+ 
+ extern const struct nettle_cipher nettle_gost28147;
+ extern const struct nettle_cipher nettle_magma;
++extern const struct nettle_cipher nettle_kuznyechik;
+ 
+ struct nettle_hash
+ {
+diff --git a/testsuite/.gitignore b/testsuite/.gitignore
+index ab1ede3a..193b0831 100644
+--- a/testsuite/.gitignore
++++ b/testsuite/.gitignore
+@@ -51,6 +51,7 @@
+ /hkdf-test
+ /hmac-test
+ /knuth-lfib-test
++/kuznyechik-test
+ /magma-test
+ /md2-test
+ /md4-test
+diff --git a/testsuite/.test-rules.make b/testsuite/.test-rules.make
+index 06394461..33b40f5f 100644
+--- a/testsuite/.test-rules.make
++++ b/testsuite/.test-rules.make
+@@ -37,6 +37,9 @@ des3-test$(EXEEXT): des3-test.$(OBJEXT)
+ gost28147-test$(EXEEXT): gost28147-test.$(OBJEXT)
+ 	$(LINK) gost28147-test.$(OBJEXT) $(TEST_OBJS) -o gost28147-test$(EXEEXT)
+ 
++kuznyechik-test$(EXEEXT): kuznyechik-test.$(OBJEXT)
++	$(LINK) kuznyechik-test.$(OBJEXT) $(TEST_OBJS) -o kuznyechik-test$(EXEEXT)
++
+ magma-test$(EXEEXT): magma-test.$(OBJEXT)
+ 	$(LINK) magma-test.$(OBJEXT) $(TEST_OBJS) -o magma-test$(EXEEXT)
+ 
+diff --git a/testsuite/Makefile.in b/testsuite/Makefile.in
+index 5833ee0c..dba0ddfa 100644
+--- a/testsuite/Makefile.in
++++ b/testsuite/Makefile.in
+@@ -16,7 +16,7 @@ TS_NETTLE_SOURCES = aes-test.c arcfour-test.c arctwo-test.c \
+ 		    camellia-test.c chacha-test.c \
+ 		    cnd-memcpy-test.c \
+ 		    des-test.c des3-test.c \
+-		    gost28147-test.c magma-test.c \
++		    gost28147-test.c kuznyechik-test.c magma-test.c \
+ 		    md2-test.c md4-test.c md5-test.c md5-compat-test.c \
+ 		    memeql-test.c memxor-test.c gosthash94-test.c \
+ 		    ripemd160-test.c hkdf-test.c \
+diff --git a/testsuite/kuznyechik-test.c b/testsuite/kuznyechik-test.c
+new file mode 100644
+index 00000000..b881acf0
+--- /dev/null
++++ b/testsuite/kuznyechik-test.c
+@@ -0,0 +1,74 @@
++#include "testutils.h"
++#include "kuznyechik.h"
++#include "cfb.h"
++
++void test_main(void)
++{
++  test_cipher(&nettle_kuznyechik,
++      SHEX("8899aabbccddeeff0011223344556677fedcba98765432100123456789abcdef"),
++      SHEX("1122334455667700ffeeddccbbaa9988"
++	   "00112233445566778899aabbcceeff0a"
++	   "112233445566778899aabbcceeff0a00"
++	   "2233445566778899aabbcceeff0a0011"),
++      SHEX("7f679d90bebc24305a468d42b9d4edcd"
++	   "b429912c6e0032f9285452d76718d08b"
++	   "f0ca33549d247ceef3f5a5313bd4b157"
++	   "d0b09ccde830b9eb3a02c4c5aa8ada98"));
++
++  test_cipher(&nettle_kuznyechik,
++      SHEX("8899aabbccddeeff0011223344556677fedcba98765432100123456789abcdef"),
++      SHEX("1234567890abcef00000000000000000"),
++      SHEX("e0b7ebfa9468a6db2a95826efb173830"));
++
++  test_cipher(&nettle_kuznyechik,
++      SHEX("8899aabbccddeeff0011223344556677fedcba98765432100123456789abcdef"),
++      SHEX("1234567890abcef00000000000000001"),
++      SHEX("85ffc500b2f4582a7ba54e08f0ab21ee"));
++
++  test_cipher(&nettle_kuznyechik,
++      SHEX("8899aabbccddeeff0011223344556677fedcba98765432100123456789abcdef"),
++      SHEX("1234567890abcef00000000000000002"),
++      SHEX("b4c8dbcfb353195b4c42cc3ddb9ba9a5"));
++
++  test_cipher(&nettle_kuznyechik,
++      SHEX("8899aabbccddeeff0011223344556677fedcba98765432100123456789abcdef"),
++      SHEX("1234567890abcef00000000000000003"),
++      SHEX("e9a2bee4947b322f7b7d1db6dfb7ba62"));
++
++  test_cipher(&nettle_kuznyechik,
++      SHEX("2666ed40ae687811745ca0b448f57a7b390adb5780307e8e9659ac403ae60c60"),
++      SHEX("1234567890abcef00000000000000002"),
++      SHEX("5aecd8cb31093bdd99bdbdebb07ae200"));
++
++  test_cipher(&nettle_kuznyechik,
++      SHEX("2666ed40ae687811745ca0b448f57a7b390adb5780307e8e9659ac403ae60c60"),
++      SHEX("1234567890abcef00000000000000003"),
++      SHEX("7a4f09a00ea71ca094f3f8412f8a5057"));
++
++  test_cipher(&nettle_kuznyechik,
++      SHEX("bb3dd5402e999b7a3debb0db45448ec530f07365dfee3aba8415f77ac8f34ce8"),
++      SHEX("1234567890abcef00000000000000004"),
++      SHEX("fc74a010f126754ba73082ce618a984c"));
++
++  test_cipher(&nettle_kuznyechik,
++      SHEX("bb3dd5402e999b7a3debb0db45448ec530f07365dfee3aba8415f77ac8f34ce8"),
++      SHEX("1234567890abcef00000000000000005"),
++      SHEX("9ba8619b09af9cfdc0a1c47e3432340d"));
++
++  test_cipher(&nettle_kuznyechik,
++      SHEX("23362fd553cad2178299a5b5a2d4722e3bb83c730a8bf57ce2dd004017f8c565"),
++      SHEX("1234567890abcef00000000000000006"),
++      SHEX("316fde4a1b507318872d2be7eaf4ed19"));
++
++  test_cipher_ctr(&nettle_kuznyechik,
++      SHEX("8899aabbccddeeff0011223344556677fedcba98765432100123456789abcdef"),
++      SHEX("1122334455667700ffeeddccbbaa9988"
++	   "00112233445566778899aabbcceeff0a"
++	   "112233445566778899aabbcceeff0a00"
++	   "2233445566778899aabbcceeff0a0011"),
++      SHEX("f195d8bec10ed1dbd57b5fa240bda1b8"
++	   "85eee733f6a13e5df33ce4b33c45dee4"
++	   "a5eae88be6356ed3d5e877f13564a3a5"
++	   "cb91fab1f20cbab6d1c6d15820bdba73"),
++      SHEX("1234567890abcef00000000000000000"));
++}
+diff --git a/testsuite/meta-cipher-test.c b/testsuite/meta-cipher-test.c
+index 4d93c5f1..d0cf3a55 100644
+--- a/testsuite/meta-cipher-test.c
++++ b/testsuite/meta-cipher-test.c
+@@ -14,6 +14,7 @@ const char* ciphers[] = {
+   "camellia256",
+   "cast128",
+   "gost28147",
++  "kuznyechik",
+   "magma",
+   "serpent128",
+   "serpent192",
+-- 
+2.49.0
+
