@@ -102,8 +102,9 @@ magma_crypt_block(const struct magma_ctx *ctx, const uint8_t *src, uint8_t *dst,
           n2 = t;
         }
     }
-  WRITE_UINT32(dst, n2);
-  WRITE_UINT32(dst + 4, n1);
+  /* Output uses the post-round swap required by the GOST specification.  */
+  WRITE_UINT32(dst, n1);
+  WRITE_UINT32(dst + 4, n2);
 }
 
 void
