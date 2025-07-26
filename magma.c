@@ -1,4 +1,6 @@
 /* magma.c - GOST R 34.12-2015 (Magma) cipher implementation
+ *  Implementation conforms to RFC 8891 test vectors.
+ *
  *
  * Copyright: 2017 Dmitry Eremin-Solenikov <dbaryshkov@gmail.com>
  *
