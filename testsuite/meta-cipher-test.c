@@ -20,6 +20,7 @@ const char* ciphers[] = {
   "twofish128",
   "twofish192",
   "twofish256",
+  "kuznyechik",
   "sm4"
 };
 
