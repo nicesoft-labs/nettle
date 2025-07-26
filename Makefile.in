@@ -156,8 +156,9 @@ nettle_SOURCES = aes-decrypt-internal.c aes-decrypt.c aes-decrypt-table.c \
 		 serpent-set-key.c serpent-encrypt.c serpent-decrypt.c \
 		 serpent-meta.c \
 		 streebog.c streebog-meta.c \
-		 twofish.c twofish-meta.c \
-		 sm4.c sm4-meta.c \
+                twofish.c twofish-meta.c \
+                kuznyechik.c kuznyechik-meta.c \
+                sm4.c sm4-meta.c \
 		 umac-nh.c umac-nh-n.c umac-l2.c umac-l3.c \
 		 umac-poly64.c umac-poly128.c umac-set-key.c \
 		 umac32.c umac64.c umac96.c umac128.c \
@@ -242,7 +243,7 @@ HEADERS = aes.h arcfour.h arctwo.h asn1.h blowfish.h balloon.h \
 	  ocb.h pbkdf2.h \
 	  pgp.h pkcs1.h pss.h pss-mgf1.h realloc.h ripemd160.h rsa.h \
 	  salsa20.h sexp.h serpent.h \
-	  sha.h sha1.h sha2.h sha3.h sm3.h sm4.h streebog.h twofish.h \
+         sha.h sha1.h sha2.h sha3.h sm3.h sm4.h streebog.h kuznyechik.h twofish.h \
 	  umac.h yarrow.h xts.h poly1305.h nist-keywrap.h
 
 INSTALL_HEADERS = $(HEADERS) version.h @IF_MINI_GMP@ mini-gmp.h
@@ -250,7 +251,8 @@ INSTALL_HEADERS = $(HEADERS) version.h @IF_MINI_GMP@ mini-gmp.h
 SOURCES = $(nettle_SOURCES) $(hogweed_SOURCES) \
 	  $(getopt_SOURCES) $(internal_SOURCES) \
 	  $(OPT_SOURCES) \
-	  aesdata.c desdata.c twofishdata.c shadata.c gcmdata.c eccdata.c
+         aesdata.c desdata.c twofishdata.c shadata.c gcmdata.c eccdata.c \
+         kuzdata.c
 
 # NOTE: This list must include all source files, with no duplicates,
 # independently of which source files are included in the build.
@@ -264,8 +266,9 @@ DISTFILES = $(SOURCES) $(HEADERS) getopt.h getopt_int.h \
 	README CONTRIBUTING.md AUTHORS COPYING.LESSERv3 COPYINGv2 COPYINGv3 \
 	INSTALL NEWS ChangeLog \
 	nettle.pc.in hogweed.pc.in \
-	desdata.stamp $(des_headers) descore.README \
-	aes-internal.h block-internal.h blowfish-internal.h bswap-internal.h \
+        desdata.stamp $(des_headers) descore.README \
+       kuztable.h kuzdata.stamp \
+        aes-internal.h block-internal.h blowfish-internal.h bswap-internal.h \
 	camellia-internal.h \
 	ghash-internal.h gost28147-internal.h poly1305-internal.h \
 	serpent-internal.h cast128_sboxes.h desinfo.h desCode.h \
@@ -351,6 +354,15 @@ desdata.stamp: desdata.c
 	echo stamp > desdata.stamp
 
 des.$(OBJEXT): des.c des.h $(des_headers)
+kuztable.h: kuzdata.stamp
+	./kuzdata$(EXEEXT_FOR_BUILD) > $@T && mv $@T $@
+
+kuzdata.stamp: kuzdata.c
+	$(MAKE) kuzdata$(EXEEXT_FOR_BUILD)
+	echo stamp > kuzdata.stamp
+
+kuznyechik.$(OBJEXT): kuztable.h
+
 
 # Generate ECC files, with roughly 16 KB of tables per curve.
 

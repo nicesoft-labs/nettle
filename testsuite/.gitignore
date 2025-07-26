@@ -99,6 +99,7 @@
 /sha512-256-test
 /sha512-test
 /sm3-test
+/kuznyechik-test
 /sm4-test
 /streebog-test
 /twofish-test

@@ -927,6 +927,7 @@ main(int argc, char **argv)
       &nettle_des3,
       &nettle_serpent256,
       &nettle_twofish128, &nettle_twofish192, &nettle_twofish256,
+      &nettle_kuznyechik,
       &nettle_sm4,
       NULL
     };
